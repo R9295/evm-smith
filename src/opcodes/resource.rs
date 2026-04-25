@@ -1,6 +1,6 @@
 #[derive(Debug, Clone)]
 pub struct Resource {
-    stack: usize,
+    stack: isize,
     gas: u64,
 }
 
@@ -8,21 +8,21 @@ impl Resource {
     pub fn builder() -> ResourceBuilder {
         ResourceBuilder::default()
     }
-    pub fn set_stack(&mut self, stack: usize) {
+    pub fn set_stack(&mut self, stack: isize) {
         self.stack = stack;
     }
     pub fn gas(&self) -> u64 {
         self.gas
     }
 
-    pub fn stack(&self) -> usize {
+    pub fn stack(&self) -> isize {
         self.stack
     }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct ResourceBuilder {
-    stack: usize,
+    stack: isize,
     gas: u64,
 }
 
@@ -32,7 +32,7 @@ impl ResourceBuilder {
         self
     }
 
-    pub fn stack(mut self, stack: usize) -> Self {
+    pub fn stack(mut self, stack: isize) -> Self {
         self.stack = stack;
         self
     }

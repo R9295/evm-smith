@@ -14,7 +14,7 @@ fn main() {
         .as_secs();
     let mut rand = fastrand::Rng::with_seed(seed.clone());
     let mut machine_rand = fastrand::Rng::with_seed(seed.clone());
-    let gas = 1000;
+    let gas = 300_000;
     let mut machine = Machine::new(gas, machine_rand);
     loop {
         let op = get_next_op(&mut rand);

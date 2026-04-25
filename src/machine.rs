@@ -1,9 +1,11 @@
+use std::process;
+
 use alloy_primitives::U256;
 use fastrand::Rng;
 
 use crate::{
     error::Error,
-    opcodes::{Opcode, Resource, PUSH_OPCODES},
+    opcodes::{Opcode, Pop, Resource, PUSH_OPCODES},
 };
 
 #[derive(Debug)]
@@ -25,7 +27,8 @@ impl Machine {
     }
     pub fn ingest(&mut self, op: &'static dyn Opcode) -> anyhow::Result<(), Error> {
         let requires = op.requires();
-        match self.constraints(&requires) {
+        let provides = op.provides();
+        match self.constraints(&requires, &provides) {
             None => self.bytecode.push(op),
             Some(mut constraint) => {
                 if constraint.gas() > 0 {
@@ -35,28 +38,47 @@ impl Machine {
                     while constraint.stack() != 0 {
                         let push_op = get_push_op(&mut self.rng);
                         self.ingest(push_op)?;
-                        constraint.set_stack(constraint.stack() - 1);
+                        // constraint.set_stack(constraint.stack() - 1);
                     }
-                    self.bytecode.push(op);
                 }
+                if constraint.stack() < 0 {
+                    self.ingest(&Pop);
+                    // constraint.set_stack(constraint.stack() + 1);
+                }
+                // PUSH ONLY AT THE END OF ALL CONSTRAINTS
+                self.bytecode.push(op);
+            }
+        };
+        self.gas = self.gas.saturating_sub(requires.gas());
+        if requires.stack() > 0 {
+            for _ in 0..requires.stack() {
+                self.stack.pop();
             }
         }
-        self.gas = self.gas.saturating_sub(requires.gas());
+        if provides.stack() > 0 {
+            for _ in 0..provides.stack() {
+                self.stack.push(U256::ONE);
+            }
+        }
+        debug_assert!(self.stack.len() <= 1024);
         Ok(())
     }
 
-    pub fn constraints(&self, requires: &Resource) -> Option<Resource> {
+    pub fn constraints(&self, requires: &Resource, provides: &Resource) -> Option<Resource> {
         let current_stack = self.stack.len();
         let gas_delta = if self.gas < requires.gas() {
             requires.gas() - self.gas
         } else {
             0
         };
-        let mut stack_delta = if current_stack < requires.stack() {
-            requires.stack() - current_stack
+        let mut stack_delta = if (current_stack as isize) < requires.stack(){
+            requires.stack() - (current_stack as isize)
         } else {
             0
         };
+        if self.stack.len() == 1024 && provides.stack() > 0 {
+            stack_delta = 0 - provides.stack();
+        }
         if stack_delta == 0 && gas_delta == 0 {
             None
         } else {
