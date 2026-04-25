@@ -3,7 +3,7 @@ use fastrand::Rng;
 
 use crate::{
     error::Error,
-    opcodes::{Opcode, Pop, Resource, PUSH_OPCODES},
+    opcodes::{Opcode, Resource},
 };
 
 #[derive(Debug)]
@@ -11,7 +11,7 @@ pub struct Machine {
     rng: Rng,
     gas: u64,
     stack: Vec<U256>,
-    bytecode: Vec<&'static dyn Opcode>,
+    bytecode: Vec<Opcode>,
 }
 
 impl Machine {
@@ -24,7 +24,7 @@ impl Machine {
         }
     }
 
-    pub fn ingest(&mut self, op: &'static dyn Opcode) -> anyhow::Result<(), Error> {
+    pub fn ingest(&mut self, op: Opcode) -> anyhow::Result<(), Error> {
         let mut stack = vec![op];
         while let Some(op) = stack.pop() {
             let requires = op.requires();
@@ -49,17 +49,15 @@ impl Machine {
             // SAFE: just validated earlier
             let constraints = constraints.unwrap();
             stack.insert(0, op);
-                if constraints.gas() > 0 {
-                    return Err(Error::OutOfGas);
-                }
-                if constraints.stack() > 0 {
-                    let push_op = get_push_op(&mut self.rng);
-                    stack.insert(0, push_op);
-                }
-                if constraints.stack() < 0 {
-                    stack.insert(0, &Pop);
-                }
-
+            if constraints.gas() > 0 {
+                return Err(Error::OutOfGas);
+            }
+            if constraints.stack() > 0 {
+                stack.insert(0, Opcode::generate_push(&mut self.rng));
+            }
+            if constraints.stack() < 0 {
+                stack.insert(0, Opcode::Pop);
+            }
         }
         Ok(())
     }
@@ -75,7 +73,7 @@ impl Machine {
         } else {
             0
         };
-        let mut stack_delta = if (current_stack as isize) < requires.stack(){
+        let mut stack_delta = if (current_stack as isize) < requires.stack() {
             requires.stack() - (current_stack as isize)
         } else {
             0
@@ -94,8 +92,4 @@ impl Machine {
             )
         }
     }
-}
-
-fn get_push_op(rand: &mut Rng) -> &'static dyn Opcode {
-    PUSH_OPCODES[rand.usize(0..PUSH_OPCODES.len())]
 }

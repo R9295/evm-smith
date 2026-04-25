@@ -5,11 +5,9 @@ mod runner;
 
 use crate::{
     machine::Machine,
-    opcodes::{Opcode, ALL_OPCODES},
+    opcodes::{Opcode},
     runner::RunSummary,
 };
-
-use fastrand::Rng;
 use revm::primitives::{ExecutionResult, HaltReason, OutOfGasError};
 use std::time::SystemTime;
 
@@ -24,7 +22,7 @@ fn main() {
         let gas = 3_00_000;
         let mut machine = Machine::new(gas, machine_rand);
         loop {
-            let op = get_next_op(&mut rand);
+            let op = Opcode::generate(&mut rand);
             let Ok(_) = machine.ingest(op) else {
                 break;
             };
@@ -74,10 +72,6 @@ fn main() {
             }
         }
     }
-}
-
-fn get_next_op(rand: &mut Rng) -> &'static dyn Opcode {
-    ALL_OPCODES[rand.usize(0..ALL_OPCODES.len())]
 }
 
 fn report_error(run_summary: &RunSummary) {
