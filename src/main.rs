@@ -1,9 +1,13 @@
-mod machine;
-mod runner;
-mod opcodes;
 mod error;
+mod machine;
+mod opcodes;
+mod runner;
 
-use crate::{machine::Machine, opcodes::{Opcode, ALL_OPCODES}, runner::RunSummary};
+use crate::{
+    machine::Machine,
+    opcodes::{Opcode, ALL_OPCODES},
+    runner::RunSummary,
+};
 
 use fastrand::Rng;
 use revm::primitives::{ExecutionResult, HaltReason, OutOfGasError};
@@ -15,16 +19,17 @@ fn main() {
         .unwrap()
         .as_secs();
     let mut rand = fastrand::Rng::with_seed(seed.clone());
-    let machine_rand = fastrand::Rng::with_seed(seed);
-    let gas = 300_000;
-    let mut machine = Machine::new(gas, machine_rand);
-    loop {
-        let op = get_next_op(&mut rand);
-        let Ok(_) = machine.ingest(op) else {
-            break;
-        };
-    };
-    let run_summary = runner::run(&machine.bytecode(), gas as u64);
+    for _ in 0..50 {
+        let machine_rand = fastrand::Rng::with_seed(seed);
+        let gas = 300_000;
+        let mut machine = Machine::new(gas, machine_rand);
+        loop {
+            let op = get_next_op(&mut rand);
+            let Ok(_) = machine.ingest(op) else {
+                break;
+            };
+        }
+        let run_summary = runner::run(&machine.bytecode(), gas as u64);
         match run_summary.result {
             ExecutionResult::Success {
                 reason,
@@ -68,6 +73,7 @@ fn main() {
                 };
             }
         }
+    }
 }
 
 fn get_next_op(rand: &mut Rng) -> &'static dyn Opcode {

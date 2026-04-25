@@ -61,7 +61,7 @@ pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
             tx.caller = caller;
             tx.transact_to = TxKind::Call(code_addr);
             tx.data = Bytes::new();
-            tx.gas_limit = gas_budget.saturating_add(TX_INTRINSIC_GAS);
+            tx.gas_limit = gas_budget.saturating_add(TX_INTRINSIC_GAS + 1);
             tx.value = call_value;
         })
         .append_handler_register(inspector_handle_register)

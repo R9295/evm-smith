@@ -25,41 +25,42 @@ impl Machine {
     }
 
     pub fn ingest(&mut self, op: &'static dyn Opcode) -> anyhow::Result<(), Error> {
-        let requires = op.requires();
-        let provides = op.provides();
-        match self.constraints(&requires, &provides) {
-            None => self.bytecode.push(op),
-            Some(mut constraint) => {
-                if constraint.gas() > 0 {
-                    return Err(Error::OutOfGas);
-                }
-                if constraint.stack() > 0 {
-                    while constraint.stack() != 0 {
-                        let push_op = get_push_op(&mut self.rng);
-                        self.ingest(push_op)?;
-                        // constraint.set_stack(constraint.stack() - 1);
+        let mut stack = vec![op];
+        while let Some(op) = stack.pop() {
+            let requires = op.requires();
+            let provides = op.provides();
+            let constraints = self.constraints(&requires, &provides);
+            if constraints.is_none() {
+                self.gas = self.gas.checked_sub(requires.gas()).unwrap();
+                if requires.stack() > 0 {
+                    for _ in 0..requires.stack() {
+                        self.stack.pop();
                     }
                 }
-                if constraint.stack() < 0 {
-                    self.ingest(&Pop)?;
-                    // constraint.set_stack(constraint.stack() + 1);
+                if provides.stack() > 0 {
+                    for _ in 0..provides.stack() {
+                        self.stack.push(U256::ONE);
+                    }
                 }
-                // PUSH ONLY AT THE END OF ALL CONSTRAINTS
+                debug_assert!(self.stack.len() <= 1024);
                 self.bytecode.push(op);
+                return Ok(());
             }
-        };
-        self.gas = self.gas.saturating_sub(requires.gas());
-        if requires.stack() > 0 {
-            for _ in 0..requires.stack() {
-                self.stack.pop();
-            }
+            // SAFE: just validated earlier
+            let constraints = constraints.unwrap();
+            stack.insert(0, op);
+                if constraints.gas() > 0 {
+                    return Err(Error::OutOfGas);
+                }
+                if constraints.stack() > 0 {
+                    let push_op = get_push_op(&mut self.rng);
+                    stack.insert(0, push_op);
+                }
+                if constraints.stack() < 0 {
+                    stack.insert(0, &Pop);
+                }
+
         }
-        if provides.stack() > 0 {
-            for _ in 0..provides.stack() {
-                self.stack.push(U256::ONE);
-            }
-        }
-        debug_assert!(self.stack.len() <= 1024);
         Ok(())
     }
 
