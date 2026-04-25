@@ -3,7 +3,7 @@ use revm::{
     Database, Evm, EvmContext, Inspector,
     db::{CacheDB, EmptyDB},
     inspector_handle_register,
-    interpreter::Interpreter,
+    interpreter::{Interpreter, OpCode},
     primitives::{AccountInfo, Address, Bytecode, Bytes, ExecutionResult, TxKind, U256},
 };
 
@@ -70,9 +70,15 @@ pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
     let result = evm.transact().expect("evm transact failed").result;
     let inspector = evm.into_context().external;
 
+    let trace = inspector
+        .trace
+        .iter()
+        .map(|op| OpCode::name_by_op(*op).to_string())
+        .collect();
+
     RunSummary {
         result,
         opcode_counts: inspector.opcode_counts,
-        trace: vec![],
+        trace,
     }
 }

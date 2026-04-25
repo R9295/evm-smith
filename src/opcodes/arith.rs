@@ -133,7 +133,8 @@ impl Opcode for MulMod {
 
 impl Opcode for Exp {
     fn requires(&self) -> Resource {
-        Resource::builder().stack(2).gas(10).build()
+        // EIP-160: 10 + 50 * byte_size(exponent); worst case is a 32-byte exponent.
+        Resource::builder().stack(2).gas(10 + 50 * 32).build()
     }
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()

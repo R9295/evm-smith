@@ -21,7 +21,7 @@ fn main() {
     let mut rand = fastrand::Rng::with_seed(seed.clone());
     for _ in 0..50 {
         let machine_rand = fastrand::Rng::with_seed(seed);
-        let gas = 300_000;
+        let gas = 3_00_000;
         let mut machine = Machine::new(gas, machine_rand);
         loop {
             let op = get_next_op(&mut rand);
@@ -81,6 +81,8 @@ fn get_next_op(rand: &mut Rng) -> &'static dyn Opcode {
 }
 
 fn report_error(run_summary: &RunSummary) {
-    eprintln!("bad halt! trace: {:?}", run_summary);
+    eprintln!("bad halt! result: {:?}", run_summary.result);
+    eprintln!("opcodes run ({}):", run_summary.trace.len());
+    eprintln!("ops: {:?}", run_summary.trace);
     panic!("FATAL ERROR: generator invariant violated");
 }

@@ -44,7 +44,7 @@ impl Machine {
                 }
                 debug_assert!(self.stack.len() <= 1024);
                 self.bytecode.push(op);
-                return Ok(());
+                continue;
             }
             // SAFE: just validated earlier
             let constraints = constraints.unwrap();
