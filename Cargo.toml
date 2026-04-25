@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+alloy-primitives = "1.5.7"
+anyhow = "1.0.102"
 fastrand = "2.4.1"
