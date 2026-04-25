@@ -1,4 +1,4 @@
-use super::Opcode;
+use super::{Opcode, Resource};
 
 #[derive(Debug)]
 pub struct Add;
@@ -23,14 +23,101 @@ pub struct Exp;
 #[derive(Debug)]
 pub struct SignExtend;
 
-impl Opcode for Add {}
-impl Opcode for Mul {}
-impl Opcode for Sub {}
-impl Opcode for Div {}
-impl Opcode for SDiv {}
-impl Opcode for Mod {}
-impl Opcode for SMod {}
-impl Opcode for AddMod {}
-impl Opcode for MulMod {}
-impl Opcode for Exp {}
-impl Opcode for SignExtend {}
+impl Opcode for Add {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(3).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for Mul {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(5).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for Sub {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(3).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for Div {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(5).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for SDiv {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(5).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for Mod {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(5).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for SMod {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(5).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for AddMod {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(3).gas(8).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for MulMod {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(3).gas(8).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for Exp {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(10).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}
+
+impl Opcode for SignExtend {
+    fn requires(&self) -> Resource {
+        Resource::builder().stack(2).gas(5).build()
+    }
+    fn provides(&self) -> Resource {
+        Resource::builder().stack(1).build()
+    }
+}

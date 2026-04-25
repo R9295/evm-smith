@@ -5,7 +5,10 @@ pub use resource::*;
 pub use arith::*;
 pub use stack::*;
 
-pub trait Opcode: Sync + std::fmt::Debug {}
+pub trait Opcode: Sync + std::fmt::Debug {
+    fn requires(&self) -> Resource;
+    fn provides(&self) -> Resource;
+}
 
 pub static ALL_OPCODES: &[&dyn Opcode] = &[
     &Add,
