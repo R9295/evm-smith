@@ -1,5 +1,3 @@
-use std::process;
-
 use alloy_primitives::U256;
 use fastrand::Rng;
 
@@ -13,7 +11,7 @@ pub struct Machine {
     rng: Rng,
     gas: u64,
     stack: Vec<U256>,
-    pub bytecode: Vec<&'static dyn Opcode>,
+    bytecode: Vec<&'static dyn Opcode>,
 }
 
 impl Machine {
@@ -25,6 +23,7 @@ impl Machine {
             bytecode: vec![],
         }
     }
+
     pub fn ingest(&mut self, op: &'static dyn Opcode) -> anyhow::Result<(), Error> {
         let requires = op.requires();
         let provides = op.provides();
@@ -42,7 +41,7 @@ impl Machine {
                     }
                 }
                 if constraint.stack() < 0 {
-                    self.ingest(&Pop);
+                    self.ingest(&Pop)?;
                     // constraint.set_stack(constraint.stack() + 1);
                 }
                 // PUSH ONLY AT THE END OF ALL CONSTRAINTS
@@ -62,6 +61,10 @@ impl Machine {
         }
         debug_assert!(self.stack.len() <= 1024);
         Ok(())
+    }
+
+    pub fn bytecode(&self) -> Vec<u8> {
+        self.bytecode.iter().flat_map(|op| op.render()).collect()
     }
 
     pub fn constraints(&self, requires: &Resource, provides: &Resource) -> Option<Resource> {

@@ -8,6 +8,7 @@ pub use stack::*;
 pub trait Opcode: Sync + std::fmt::Debug {
     fn requires(&self) -> Resource;
     fn provides(&self) -> Resource;
+    fn render(&self) -> Vec<u8>;
 }
 
 pub static ALL_OPCODES: &[&dyn Opcode] = &[

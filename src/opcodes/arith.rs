@@ -30,6 +30,9 @@ impl Opcode for Add {
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
     }
+    fn render(&self) -> Vec<u8> {
+        vec![0x01]
+    }
 }
 
 impl Opcode for Mul {
@@ -38,6 +41,9 @@ impl Opcode for Mul {
     }
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
+    }
+    fn render(&self) -> Vec<u8> {
+        vec![0x02]
     }
 }
 
@@ -48,6 +54,9 @@ impl Opcode for Sub {
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
     }
+    fn render(&self) -> Vec<u8> {
+        vec![0x03]
+    }
 }
 
 impl Opcode for Div {
@@ -56,6 +65,9 @@ impl Opcode for Div {
     }
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
+    }
+    fn render(&self) -> Vec<u8> {
+        vec![0x04]
     }
 }
 
@@ -66,6 +78,9 @@ impl Opcode for SDiv {
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
     }
+    fn render(&self) -> Vec<u8> {
+        vec![0x05]
+    }
 }
 
 impl Opcode for Mod {
@@ -74,6 +89,9 @@ impl Opcode for Mod {
     }
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
+    }
+    fn render(&self) -> Vec<u8> {
+        vec![0x06]
     }
 }
 
@@ -84,6 +102,9 @@ impl Opcode for SMod {
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
     }
+    fn render(&self) -> Vec<u8> {
+        vec![0x07]
+    }
 }
 
 impl Opcode for AddMod {
@@ -92,6 +113,9 @@ impl Opcode for AddMod {
     }
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
+    }
+    fn render(&self) -> Vec<u8> {
+        vec![0x08]
     }
 }
 
@@ -102,6 +126,9 @@ impl Opcode for MulMod {
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
     }
+    fn render(&self) -> Vec<u8> {
+        vec![0x09]
+    }
 }
 
 impl Opcode for Exp {
@@ -111,6 +138,9 @@ impl Opcode for Exp {
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
     }
+    fn render(&self) -> Vec<u8> {
+        vec![0x0A]
+    }
 }
 
 impl Opcode for SignExtend {
@@ -119,5 +149,8 @@ impl Opcode for SignExtend {
     }
     fn provides(&self) -> Resource {
         Resource::builder().stack(1).build()
+    }
+    fn render(&self) -> Vec<u8> {
+        vec![0x0B]
     }
 }
