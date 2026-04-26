@@ -11,6 +11,7 @@ pub struct Machine {
     rng: Rng,
     gas: u64,
     stack: Vec<U256>,
+    memory: u64,
     bytecode: Vec<Opcode>,
 }
 
@@ -19,6 +20,7 @@ impl Machine {
         Self {
             gas,
             rng,
+            memory: 0,
             stack: vec![],
             bytecode: vec![],
         }
@@ -48,10 +50,12 @@ impl Machine {
             }
             // SAFE: just validated earlier
             let constraints = constraints.unwrap();
+            // Since we have constraints, add this back to the stack
             stack.insert(0, op);
             if constraints.gas() > 0 {
                 return Err(Error::OutOfGas);
             }
+            // Proceed to solve constraints before we resolve the op.
             if constraints.stack() > 0 {
                 stack.insert(0, Opcode::generate_push(&mut self.rng));
             }
