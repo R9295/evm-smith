@@ -161,6 +161,8 @@ pub enum Opcode {
 
     // Memory store (rendered as PUSH32 value, PUSH8 offset, MSTORE).
     MStore(u64, U256),
+    // Memory load (rendered as PUSH8 offset, MLOAD).
+    MLoad(u64),
 }
 
 impl Opcode {
@@ -326,6 +328,14 @@ impl Opcode {
                 // NOTE: stack = 2 since we push our own offset + value onto the stack
                 Resource::builder().stack(2).gas(9 + expansion).build()
             }
+            // Rendered as PUSH8 offset (3) + MLOAD (3 + memory expansion).
+            Opcode::MLoad(offset) => {
+                let new_size = round_up_to_word(offset.saturating_add(32));
+                let expansion = memory_word_cost(new_size)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                // NOTE: stack = 1 since we push our own offset onto the stack.
+                Resource::builder().stack(1).gas(6 + expansion).build()
+            }
         }
     }
 
@@ -337,6 +347,12 @@ impl Opcode {
                 let new_size = round_up_to_word(offset.saturating_add(32));
                 let increment = new_size.saturating_sub(machine.memory());
                 Resource::builder().memory(increment).build()
+            }
+            // MLoad pushes the loaded word and grows memory to cover offset..offset+32.
+            Opcode::MLoad(offset) => {
+                let new_size = round_up_to_word(offset.saturating_add(32));
+                let increment = new_size.saturating_sub(machine.memory());
+                Resource::builder().stack(1).memory(increment).build()
             }
             // DUP_n leaves n+1 items; SWAP_n leaves n+1 items.
             Opcode::Dup1 | Opcode::Swap1 => Resource::builder().stack(2).build(),
@@ -362,7 +378,7 @@ impl Opcode {
     /// Returns a uniformly-random `Opcode` variant. For `Push*` variants the
     /// immediate-byte array is filled with random bytes from `rng`.
     pub fn generate(rng: &mut Rng) -> Opcode {
-        const VARIANT_COUNT: usize = 121;
+        const VARIANT_COUNT: usize = 122;
         Self::nth_variant(rng.usize(0..VARIANT_COUNT), rng)
     }
 
@@ -504,6 +520,11 @@ impl Opcode {
                 rng.fill(&mut value_bytes);
                 Opcode::MStore(offset, U256::from_be_bytes(value_bytes))
             }
+            121 => {
+                // NOTE: MLOAD memory offset capped at u16.
+                let offset = rng.u16(..) as u64;
+                Opcode::MLoad(offset)
+            }
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         }
     }
@@ -637,6 +658,13 @@ impl Opcode {
                 out.push(0x67); // PUSH8 offset
                 out.extend_from_slice(&offset.to_be_bytes());
                 out.push(0x52); // MSTORE
+                out
+            }
+            Opcode::MLoad(offset) => {
+                let mut out = Vec::with_capacity(1 + 8 + 1);
+                out.push(0x67); // PUSH8 offset
+                out.extend_from_slice(&offset.to_be_bytes());
+                out.push(0x51); // MLOAD
                 out
             }
         }
