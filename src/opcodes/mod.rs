@@ -163,6 +163,37 @@ pub enum Opcode {
     MStore(u64, U256),
     // Memory load (rendered as PUSH8 offset, MLOAD).
     MLoad(u64),
+
+    // LOG_N: (offset, length, topic1.., topicN). Rendered as PUSH32 topicN ‖ ... ‖
+    // PUSH32 topic1 ‖ PUSH8 length ‖ PUSH8 offset ‖ LOGN.
+    Log0(u64, u64),
+    Log1(u64, u64, U256),
+    Log2(u64, u64, U256, U256),
+    Log3(u64, u64, U256, U256, U256),
+    Log4(u64, u64, U256, U256, U256, U256),
+}
+
+/// Memory size required to access `offset..offset+length`. EVM does no memory
+/// access (and no expansion) when length is zero.
+fn log_memory_size(offset: u64, length: u64) -> u64 {
+    if length == 0 {
+        0
+    } else {
+        round_up_to_word(offset.saturating_add(length))
+    }
+}
+
+/// LOG offset capped at u16 (memory expansion gas), length capped at u8
+/// (per-byte LOG_DATA gas).
+/// NOTE: memory offset capped at u16
+fn random_log_range(rng: &mut Rng) -> (u64, u64) {
+    (rng.u16(..) as u64, rng.u8(..) as u64)
+}
+
+fn random_topic(rng: &mut Rng) -> U256 {
+    let mut bytes = [0u8; 32];
+    rng.fill(&mut bytes);
+    U256::from_be_bytes(bytes)
 }
 
 impl Opcode {
@@ -336,6 +367,47 @@ impl Opcode {
                 // NOTE: stack = 1 since we push our own offset onto the stack.
                 Resource::builder().stack(1).gas(6 + expansion).build()
             }
+            // LOG_N: (N+2) embedded pushes (3 gas each) + 375*(N+1) base + 8*length + expansion.
+            Opcode::Log0(offset, length) => {
+                let needed = log_memory_size(*offset, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let push_gas = 3 * (0 + 2);
+                let log_gas = 375 * (0 + 1) + 8u64.saturating_mul(*length);
+                Resource::builder().stack(2).gas(push_gas + log_gas + expansion).build()
+            }
+            Opcode::Log1(offset, length, _) => {
+                let needed = log_memory_size(*offset, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let push_gas = 3 * (1 + 2);
+                let log_gas = 375 * (1 + 1) + 8u64.saturating_mul(*length);
+                Resource::builder().stack(3).gas(push_gas + log_gas + expansion).build()
+            }
+            Opcode::Log2(offset, length, _, _) => {
+                let needed = log_memory_size(*offset, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let push_gas = 3 * (2 + 2);
+                let log_gas = 375 * (2 + 1) + 8u64.saturating_mul(*length);
+                Resource::builder().stack(4).gas(push_gas + log_gas + expansion).build()
+            }
+            Opcode::Log3(offset, length, _, _, _) => {
+                let needed = log_memory_size(*offset, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let push_gas = 3 * (3 + 2);
+                let log_gas = 375 * (3 + 1) + 8u64.saturating_mul(*length);
+                Resource::builder().stack(5).gas(push_gas + log_gas + expansion).build()
+            }
+            Opcode::Log4(offset, length, _, _, _, _) => {
+                let needed = log_memory_size(*offset, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let push_gas = 3 * (4 + 2);
+                let log_gas = 375 * (4 + 1) + 8u64.saturating_mul(*length);
+                Resource::builder().stack(6).gas(push_gas + log_gas + expansion).build()
+            }
         }
     }
 
@@ -353,6 +425,16 @@ impl Opcode {
                 let new_size = round_up_to_word(offset.saturating_add(32));
                 let increment = new_size.saturating_sub(machine.memory());
                 Resource::builder().stack(1).memory(increment).build()
+            }
+            // LOG_N produces no stack output; it may grow memory to cover offset..offset+length.
+            Opcode::Log0(offset, length)
+            | Opcode::Log1(offset, length, ..)
+            | Opcode::Log2(offset, length, ..)
+            | Opcode::Log3(offset, length, ..)
+            | Opcode::Log4(offset, length, ..) => {
+                let needed = log_memory_size(*offset, *length);
+                let increment = needed.saturating_sub(machine.memory());
+                Resource::builder().memory(increment).build()
             }
             // DUP_n leaves n+1 items; SWAP_n leaves n+1 items.
             Opcode::Dup1 | Opcode::Swap1 => Resource::builder().stack(2).build(),
@@ -378,7 +460,7 @@ impl Opcode {
     /// Returns a uniformly-random `Opcode` variant. For `Push*` variants the
     /// immediate-byte array is filled with random bytes from `rng`.
     pub fn generate(rng: &mut Rng) -> Opcode {
-        const VARIANT_COUNT: usize = 122;
+        const VARIANT_COUNT: usize = 127;
         Self::nth_variant(rng.usize(0..VARIANT_COUNT), rng)
     }
 
@@ -525,6 +607,39 @@ impl Opcode {
                 let offset = rng.u16(..) as u64;
                 Opcode::MLoad(offset)
             }
+            122 => {
+                let (offset, length) = random_log_range(rng);
+                Opcode::Log0(offset, length)
+            }
+            123 => {
+                let (offset, length) = random_log_range(rng);
+                Opcode::Log1(offset, length, random_topic(rng))
+            }
+            124 => {
+                let (offset, length) = random_log_range(rng);
+                Opcode::Log2(offset, length, random_topic(rng), random_topic(rng))
+            }
+            125 => {
+                let (offset, length) = random_log_range(rng);
+                Opcode::Log3(
+                    offset,
+                    length,
+                    random_topic(rng),
+                    random_topic(rng),
+                    random_topic(rng),
+                )
+            }
+            126 => {
+                let (offset, length) = random_log_range(rng);
+                Opcode::Log4(
+                    offset,
+                    length,
+                    random_topic(rng),
+                    random_topic(rng),
+                    random_topic(rng),
+                    random_topic(rng),
+                )
+            }
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         }
     }
@@ -667,8 +782,34 @@ impl Opcode {
                 out.push(0x51); // MLOAD
                 out
             }
+            Opcode::Log0(offset, length) => render_log(0xA0, *offset, *length, &[]),
+            Opcode::Log1(offset, length, t1) => render_log(0xA1, *offset, *length, &[*t1]),
+            Opcode::Log2(offset, length, t1, t2) => render_log(0xA2, *offset, *length, &[*t1, *t2]),
+            Opcode::Log3(offset, length, t1, t2, t3) => {
+                render_log(0xA3, *offset, *length, &[*t1, *t2, *t3])
+            }
+            Opcode::Log4(offset, length, t1, t2, t3, t4) => {
+                render_log(0xA4, *offset, *length, &[*t1, *t2, *t3, *t4])
+            }
         }
     }
+}
+
+/// Renders LOG_N as: PUSH32 topicN ‖ … ‖ PUSH32 topic1 ‖ PUSH8 length ‖ PUSH8 offset ‖ LOGN.
+/// Topics are passed in canonical order [topic1, topic2, …, topicN]; pushed in reverse so
+/// topic1 ends up just below `length` on the stack as LOG_N expects.
+fn render_log(opcode: u8, offset: u64, length: u64, topics: &[U256]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(topics.len() * 33 + 9 + 9 + 1);
+    for topic in topics.iter().rev() {
+        out.push(0x7F); // PUSH32
+        out.extend_from_slice(&topic.to_be_bytes::<32>());
+    }
+    out.push(0x67); // PUSH8 length
+    out.extend_from_slice(&length.to_be_bytes());
+    out.push(0x67); // PUSH8 offset
+    out.extend_from_slice(&offset.to_be_bytes());
+    out.push(opcode);
+    out
 }
 
 fn render_push(opcode: u8, immediate: &[u8]) -> Vec<u8> {
