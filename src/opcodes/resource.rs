@@ -2,6 +2,7 @@
 pub struct Resource {
     stack: isize,
     gas: u64,
+    memory: u64,
 }
 
 impl Resource {
@@ -18,12 +19,17 @@ impl Resource {
     pub fn stack(&self) -> isize {
         self.stack
     }
+
+    pub fn memory(&self) -> u64 {
+        self.memory
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct ResourceBuilder {
     stack: isize,
     gas: u64,
+    memory: u64,
 }
 
 impl ResourceBuilder {
@@ -37,10 +43,16 @@ impl ResourceBuilder {
         self
     }
 
+    pub fn memory(mut self, memory: u64) -> Self {
+        self.memory = memory;
+        self
+    }
+
     pub fn build(self) -> Resource {
         Resource {
             stack: self.stack,
             gas: self.gas,
+            memory: self.memory,
         }
     }
 }

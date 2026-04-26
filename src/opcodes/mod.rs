@@ -1,7 +1,23 @@
 mod resource;
 pub use resource::*;
 
+use alloy_primitives::U256;
 use fastrand::Rng;
+
+use crate::machine::Machine;
+
+/// EVM memory pricing: 3 * words + words^2 / 512, where words is the
+/// number of 32-byte words required to cover `size_bytes`.
+fn memory_word_cost(size_bytes: u64) -> u64 {
+    let words = (size_bytes + 31) / 32;
+    3u64.saturating_mul(words)
+        .saturating_add(words.saturating_mul(words) / 512)
+}
+
+/// Round `bytes` up to the next 32-byte word boundary.
+fn round_up_to_word(bytes: u64) -> u64 {
+    ((bytes + 31) / 32).saturating_mul(32)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub enum Opcode {
@@ -142,10 +158,13 @@ pub enum Opcode {
     Swap14,
     Swap15,
     Swap16,
+
+    // Memory store (rendered as PUSH32 value, PUSH8 offset, MSTORE).
+    MStore(u64, U256),
 }
 
 impl Opcode {
-    pub fn requires(&self) -> Resource {
+    pub fn requires(&self, machine: &Machine) -> Resource {
         match self {
             // 3 gas, 2 stack (binary verylow ops)
             Opcode::Add
@@ -298,12 +317,27 @@ impl Opcode {
             Opcode::Swap14 => Resource::builder().stack(15).gas(3).build(),
             Opcode::Swap15 => Resource::builder().stack(16).gas(3).build(),
             Opcode::Swap16 => Resource::builder().stack(17).gas(3).build(),
+
+            // Rendered as PUSH32 value (3) + PUSH8 offset (3) + MSTORE (3 + memory expansion).
+            Opcode::MStore(offset, _value) => {
+                let new_size = round_up_to_word(offset.saturating_add(32));
+                let expansion = memory_word_cost(new_size)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                // NOTE: stack = 2 since we push our own offset + value onto the stack
+                Resource::builder().stack(2).gas(9 + expansion).build()
+            }
         }
     }
 
-    pub fn provides(&self) -> Resource {
+    pub fn provides(&self, machine: &Machine) -> Resource {
         match self {
             Opcode::Pop | Opcode::SStore | Opcode::TStore => Resource::builder().build(),
+            // MStore is stack-neutral; it grows memory to cover offset..offset+32.
+            Opcode::MStore(offset, _value) => {
+                let new_size = round_up_to_word(offset.saturating_add(32));
+                let increment = new_size.saturating_sub(machine.memory());
+                Resource::builder().memory(increment).build()
+            }
             // DUP_n leaves n+1 items; SWAP_n leaves n+1 items.
             Opcode::Dup1 | Opcode::Swap1 => Resource::builder().stack(2).build(),
             Opcode::Dup2 | Opcode::Swap2 => Resource::builder().stack(3).build(),
@@ -328,7 +362,7 @@ impl Opcode {
     /// Returns a uniformly-random `Opcode` variant. For `Push*` variants the
     /// immediate-byte array is filled with random bytes from `rng`.
     pub fn generate(rng: &mut Rng) -> Opcode {
-        const VARIANT_COUNT: usize = 120;
+        const VARIANT_COUNT: usize = 121;
         Self::nth_variant(rng.usize(0..VARIANT_COUNT), rng)
     }
 
@@ -462,6 +496,14 @@ impl Opcode {
             117 => Opcode::Swap14,
             118 => Opcode::Swap15,
             119 => Opcode::Swap16,
+            120 => {
+                // NOTE: MSTORE memory offset capped at u16.
+                // Cap offset at u16 to keep memory expansion gas tractable.
+                let offset = rng.u16(..) as u64;
+                let mut value_bytes = [0u8; 32];
+                rng.fill(&mut value_bytes);
+                Opcode::MStore(offset, U256::from_be_bytes(value_bytes))
+            }
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         }
     }
@@ -588,6 +630,15 @@ impl Opcode {
             Opcode::Swap14 => vec![0x9D],
             Opcode::Swap15 => vec![0x9E],
             Opcode::Swap16 => vec![0x9F],
+            Opcode::MStore(offset, value) => {
+                let mut out = Vec::with_capacity(1 + 32 + 1 + 8 + 1);
+                out.push(0x7F); // PUSH32 value
+                out.extend_from_slice(&value.to_be_bytes::<32>());
+                out.push(0x67); // PUSH8 offset
+                out.extend_from_slice(&offset.to_be_bytes());
+                out.push(0x52); // MSTORE
+                out
+            }
         }
     }
 }

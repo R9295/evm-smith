@@ -26,11 +26,15 @@ impl Machine {
         }
     }
 
+    pub fn memory(&self) -> u64 {
+        self.memory
+    }
+
     pub fn ingest(&mut self, op: Opcode) -> anyhow::Result<(), Error> {
         let mut stack = vec![op];
         while let Some(op) = stack.pop() {
-            let requires = op.requires();
-            let provides = op.provides();
+            let requires = op.requires(self);
+            let provides = op.provides(self);
             let constraints = self.constraints(&requires, &provides);
             if constraints.is_none() {
                 self.gas = self.gas.checked_sub(requires.gas()).unwrap();
@@ -44,6 +48,7 @@ impl Machine {
                         self.stack.push(U256::ONE);
                     }
                 }
+                self.memory = self.memory.saturating_add(provides.memory());
                 debug_assert!(self.stack.len() <= 1024);
                 self.bytecode.push(op);
                 continue;
