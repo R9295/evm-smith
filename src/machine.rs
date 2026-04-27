@@ -8,6 +8,9 @@ use crate::{
     opcodes::{Opcode, Resource},
 };
 
+pub const DEFAULT_MEMORY_OFFSET_LIMIT: u64 = u16::MAX as u64;
+pub const DEFAULT_MEMORY_LENGTH_LIMIT: u64 = u8::MAX as u64;
+
 /// Tunables for the symbolic generator.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -17,9 +20,9 @@ pub struct Config {
     /// expressed as a percent in `0..=100`. Reserved for the upcoming CREATE
     /// opcode wiring.
     pub create_gas_percentage: u8,
-    /// When `false`, terminating ops (STOP / INVALID / RETURN / REVERT /
-    /// SELFDESTRUCT) drawn by the generator are silently skipped instead of
-    /// halting the machine.
+    /// When `false`, terminating ops (STOP / INVALID / RETURN / SELFDESTRUCT)
+    /// drawn by the generator are silently skipped instead of halting the
+    /// machine.
     pub allow_termination: bool,
     /// When `true`, CREATE/CREATE2 grows `callable_addresses` with the new
     /// contract. Disabled inside sub-machines so the rendered init code is
@@ -27,6 +30,12 @@ pub struct Config {
     /// otherwise depend on sub `current_address`, which differs between the
     /// passes by construction).
     pub grow_callable_on_create: bool,
+    /// Inclusive upper bound for memory offsets sampled by generated opcodes.
+    /// The default preserves the historical `u16` cap.
+    pub memory_offset_limit: u64,
+    /// Inclusive upper bound for memory lengths sampled by generated opcodes.
+    /// The default preserves the historical `u8` cap.
+    pub memory_length_limit: u64,
 }
 
 impl Default for Config {
@@ -36,6 +45,8 @@ impl Default for Config {
             create_gas_percentage: 50,
             allow_termination: true,
             grow_callable_on_create: true,
+            memory_offset_limit: DEFAULT_MEMORY_OFFSET_LIMIT,
+            memory_length_limit: DEFAULT_MEMORY_LENGTH_LIMIT,
         }
     }
 }
@@ -254,7 +265,11 @@ impl Machine {
         );
         let mut gen_rng = Rng::with_seed(gen_seed);
         loop {
-            let inner = Opcode::generate(&mut gen_rng);
+            let inner = Opcode::generate_with_memory_limits(
+                &mut gen_rng,
+                sub_machine.config.memory_offset_limit,
+                sub_machine.config.memory_length_limit,
+            );
             if sub_machine.ingest(inner).is_err() {
                 break;
             }

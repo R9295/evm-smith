@@ -34,7 +34,11 @@ fn generated_bytecode_matches_runtime_state() {
         let gas = 3_000_000;
         let mut machine = Machine::new(gas, machine_rand, config.clone());
         loop {
-            let op = Opcode::generate(&mut rand);
+            let op = Opcode::generate_with_memory_limits(
+                &mut rand,
+                config.memory_offset_limit,
+                config.memory_length_limit,
+            );
             let Ok(_) = machine.ingest(op) else {
                 break;
             };
@@ -49,7 +53,9 @@ fn generated_bytecode_matches_runtime_state() {
         }
         match run_summary.result {
             ExecutionResult::Success { .. } => {}
-            ExecutionResult::Revert { .. } => {}
+            ExecutionResult::Revert { .. } => {
+                report_error(&run_summary);
+            }
             ExecutionResult::Halt { ref reason, .. } => {
                 eprintln!("{:?}", reason);
                 match reason {

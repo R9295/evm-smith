@@ -17,7 +17,7 @@ use std::{
 
 use crate::{
     addresses::ExecutionAddresses,
-    machine::{Config, Machine},
+    machine::{Config, Machine, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT},
     opcodes::Opcode,
 };
 
@@ -60,6 +60,12 @@ pub struct Cli {
     /// Exit non-zero on the first FAIL or root mismatch.
     #[arg(long, default_value_t = false)]
     pub bail: bool,
+    /// Inclusive max memory offset sampled by generated memory-touching opcodes.
+    #[arg(long, default_value_t = DEFAULT_MEMORY_OFFSET_LIMIT)]
+    pub memory_offset_limit: u64,
+    /// Inclusive max memory length sampled by generated memory-touching opcodes.
+    #[arg(long, default_value_t = DEFAULT_MEMORY_LENGTH_LIMIT)]
+    pub memory_length_limit: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -471,7 +477,11 @@ fn generate_bytecode(iter: u64, seed: u64, gas: u32, config: &Config) -> Vec<u8>
     );
     let mut rand = fastrand::Rng::with_seed(machine_seed);
     loop {
-        let op = Opcode::generate(&mut rand);
+        let op = Opcode::generate_with_memory_limits(
+            &mut rand,
+            config.memory_offset_limit,
+            config.memory_length_limit,
+        );
         if machine.ingest(op).is_err() {
             break;
         }
@@ -636,6 +646,8 @@ pub fn run(cli: Cli) -> Result<()> {
         caller: sender,
         contract: ExecutionAddresses::default().contract,
     };
+    config.memory_offset_limit = cli.memory_offset_limit;
+    config.memory_length_limit = cli.memory_length_limit;
     config.addresses.assert_valid();
 
     let seed = cli.seed.unwrap_or_else(|| {
@@ -647,6 +659,8 @@ pub fn run(cli: Cli) -> Result<()> {
     println!("seed: {seed}");
     println!("cores: {}", cli.cores);
     println!("timeout: {}s", cli.timeout);
+    println!("memory offset limit: {}", config.memory_offset_limit);
+    println!("memory length limit: {}", config.memory_length_limit);
 
     let shared = Arc::new(SharedState::new());
     let mut handles = Vec::with_capacity(cli.cores);

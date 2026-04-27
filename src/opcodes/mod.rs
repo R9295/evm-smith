@@ -4,19 +4,19 @@ pub use resource::*;
 use alloy_primitives::{Address, U256};
 use fastrand::Rng;
 
-use crate::machine::Machine;
+use crate::machine::{Machine, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT};
 
 /// EVM memory pricing: 3 * words + words^2 / 512, where words is the
 /// number of 32-byte words required to cover `size_bytes`.
 fn memory_word_cost(size_bytes: u64) -> u64 {
-    let words = (size_bytes + 31) / 32;
+    let words = size_bytes.saturating_add(31) / 32;
     3u64.saturating_mul(words)
         .saturating_add(words.saturating_mul(words) / 512)
 }
 
 /// Round `bytes` up to the next 32-byte word boundary.
 fn round_up_to_word(bytes: u64) -> u64 {
-    ((bytes + 31) / 32).saturating_mul(32)
+    (bytes.saturating_add(31) / 32).saturating_mul(32)
 }
 
 #[derive(Debug, Clone)]
@@ -190,10 +190,9 @@ pub enum Opcode {
     // pushed on the stack via PUSH8 and CALLDATALOAD pops it / pushes the word.
     CallDataLoad(u64),
 
-    // Frame-terminating ops with memory range (offset, length). Rendered as
-    // PUSH8 length ‖ PUSH8 offset ‖ RETURN/REVERT.
+    // Frame-terminating op with memory range (offset, length). Rendered as
+    // PUSH8 length ‖ PUSH8 offset ‖ RETURN.
     Return(u64, u64),
-    Revert(u64, u64),
 
     // Hash of memory[offset..offset+length]. Rendered as
     // PUSH8 length ‖ PUSH8 offset ‖ KECCAK256.
@@ -276,11 +275,33 @@ fn memory_range_size(offset: u64, length: u64) -> u64 {
     }
 }
 
-/// Random `(offset, length)` for ops that touch a memory range. Offset capped
-/// at `u16::MAX` to bound memory expansion gas; length capped at `u8::MAX` to
-/// bound per-byte charges (e.g. LOG_DATA).
-fn random_memory_range(rng: &mut Rng) -> (u64, u64) {
-    (rng.u16(..) as u64, rng.u8(..) as u64)
+fn random_inclusive_u64(rng: &mut Rng, limit: u64) -> u64 {
+    if limit == u64::MAX {
+        rng.u64(..)
+    } else {
+        rng.u64(..limit + 1)
+    }
+}
+
+fn random_memory_offset(rng: &mut Rng, memory_offset_limit: u64) -> u64 {
+    random_inclusive_u64(rng, memory_offset_limit)
+}
+
+fn random_memory_length(rng: &mut Rng, memory_length_limit: u64) -> u64 {
+    random_inclusive_u64(rng, memory_length_limit)
+}
+
+/// Random `(offset, length)` for ops that touch a memory range. Both limits are
+/// configurable to bound memory expansion gas and per-byte charges.
+fn random_memory_range(
+    rng: &mut Rng,
+    memory_offset_limit: u64,
+    memory_length_limit: u64,
+) -> (u64, u64) {
+    (
+        random_memory_offset(rng, memory_offset_limit),
+        random_memory_length(rng, memory_length_limit),
+    )
 }
 
 fn random_topic(rng: &mut Rng) -> U256 {
@@ -314,9 +335,16 @@ fn copy_memory_size_two(dest: u64, src: u64, length: u64) -> u64 {
     }
 }
 
-/// (destOffset capped at u16, srcOffset capped at u16, length capped at u8).
-fn random_copy_range(rng: &mut Rng) -> (u64, u64, u64) {
-    (rng.u16(..) as u64, rng.u16(..) as u64, rng.u8(..) as u64)
+fn random_copy_range(
+    rng: &mut Rng,
+    memory_offset_limit: u64,
+    memory_length_limit: u64,
+) -> (u64, u64, u64) {
+    (
+        random_memory_offset(rng, memory_offset_limit),
+        random_memory_offset(rng, memory_offset_limit),
+        random_memory_length(rng, memory_length_limit),
+    )
 }
 
 impl Opcode {
@@ -602,9 +630,9 @@ impl Opcode {
             Opcode::Stop => Resource::builder().build(),
             // PUSH8 offset (3) + CALLDATALOAD (3); no memory expansion. Peak rise = 1.
             Opcode::CallDataLoad(_offset) => Resource::builder().stack_reserved(1).gas(6).build(),
-            // PUSH8 length (3) + PUSH8 offset (3) + RETURN/REVERT (0 + memory expansion).
+            // PUSH8 length (3) + PUSH8 offset (3) + RETURN (0 + memory expansion).
             // Peak rise = 2.
-            Opcode::Return(offset, length) | Opcode::Revert(offset, length) => {
+            Opcode::Return(offset, length) => {
                 let needed = memory_range_size(*offset, *length);
                 let expansion =
                     memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
@@ -715,8 +743,8 @@ impl Opcode {
                 let args_region = memory_range_size(*args_offset, *args_size);
                 let ret_region = memory_range_size(*ret_offset, *ret_size);
                 let needed = args_region.max(ret_region);
-                let mem_expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let mem_expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 4 * 3 + 2 + 3 + 3; // 4·PUSH8 + PUSH0 + PUSH20 + PUSH8
                 let base = 100u64;
                 let total = base
@@ -747,8 +775,8 @@ impl Opcode {
                 let args_region = memory_range_size(*args_offset, *args_size);
                 let ret_region = memory_range_size(*ret_offset, *ret_size);
                 let needed = args_region.max(ret_region);
-                let mem_expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let mem_expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 4 * 3 + 3 + 3; // 4·PUSH8 + PUSH20 + PUSH8
                 let base = 100u64;
                 let total = base
@@ -761,11 +789,11 @@ impl Opcode {
     }
 
     /// Returns true for opcodes that halt the current execution frame on
-    /// commit (STOP, RETURN, REVERT, SELFDESTRUCT).
+    /// commit (STOP, RETURN, SELFDESTRUCT).
     pub fn is_terminating(&self) -> bool {
         matches!(
             self,
-            Opcode::Stop | Opcode::Return(..) | Opcode::Revert(..) | Opcode::SelfDestruct(..)
+            Opcode::Stop | Opcode::Return(..) | Opcode::SelfDestruct(..)
         )
     }
 
@@ -774,9 +802,9 @@ impl Opcode {
             Opcode::Pop | Opcode::SStore | Opcode::TStore | Opcode::Stop => {
                 Resource::builder().build()
             }
-            // RETURN / REVERT produce no stack output but may grow memory to
-            // cover offset..offset+length.
-            Opcode::Return(offset, length) | Opcode::Revert(offset, length) => {
+            // RETURN produces no stack output but may grow memory to cover
+            // offset..offset+length.
+            Opcode::Return(offset, length) => {
                 let needed = memory_range_size(*offset, *length);
                 let increment = needed.saturating_sub(machine.memory());
                 Resource::builder().memory(increment).build()
@@ -896,8 +924,33 @@ impl Opcode {
     /// Returns a uniformly-random `Opcode` variant. For `Push*` variants the
     /// immediate-byte array is filled with random bytes from `rng`.
     pub fn generate(rng: &mut Rng) -> Opcode {
-        const VARIANT_COUNT: usize = 144;
-        Self::nth_variant(rng.usize(0..VARIANT_COUNT), rng)
+        Self::generate_with_memory_limits(
+            rng,
+            DEFAULT_MEMORY_OFFSET_LIMIT,
+            DEFAULT_MEMORY_LENGTH_LIMIT,
+        )
+    }
+
+    /// Returns a uniformly-random `Opcode` variant, sampling memory offsets from
+    /// `0..=memory_offset_limit`.
+    pub fn generate_with_memory_offset_limit(rng: &mut Rng, memory_offset_limit: u64) -> Opcode {
+        Self::generate_with_memory_limits(rng, memory_offset_limit, DEFAULT_MEMORY_LENGTH_LIMIT)
+    }
+
+    /// Returns a uniformly-random `Opcode` variant, sampling memory offsets from
+    /// `0..=memory_offset_limit` and memory lengths from `0..=memory_length_limit`.
+    pub fn generate_with_memory_limits(
+        rng: &mut Rng,
+        memory_offset_limit: u64,
+        memory_length_limit: u64,
+    ) -> Opcode {
+        const VARIANT_COUNT: usize = 143;
+        Self::nth_variant(
+            rng.usize(0..VARIANT_COUNT),
+            rng,
+            memory_offset_limit,
+            memory_length_limit,
+        )
     }
 
     /// Returns a uniformly-random `Push*` variant with random immediate bytes.
@@ -905,10 +958,20 @@ impl Opcode {
     pub fn generate_push(rng: &mut Rng) -> Opcode {
         const PUSH_OFFSET: usize = 56;
         const PUSH_COUNT: usize = 32;
-        Self::nth_variant(PUSH_OFFSET + rng.usize(0..PUSH_COUNT), rng)
+        Self::nth_variant(
+            PUSH_OFFSET + rng.usize(0..PUSH_COUNT),
+            rng,
+            DEFAULT_MEMORY_OFFSET_LIMIT,
+            DEFAULT_MEMORY_LENGTH_LIMIT,
+        )
     }
 
-    fn nth_variant(idx: usize, rng: &mut Rng) -> Opcode {
+    fn nth_variant(
+        idx: usize,
+        rng: &mut Rng,
+        memory_offset_limit: u64,
+        memory_length_limit: u64,
+    ) -> Opcode {
         match idx {
             0 => Opcode::Add,
             1 => Opcode::Mul,
@@ -1159,32 +1222,33 @@ impl Opcode {
             118 => Opcode::Swap15,
             119 => Opcode::Swap16,
             120 => {
-                // NOTE: MSTORE memory offset capped at u16.
-                // Cap offset at u16 to keep memory expansion gas tractable.
-                let offset = rng.u16(..) as u64;
+                let offset = random_memory_offset(rng, memory_offset_limit);
                 let mut value_bytes = [0u8; 32];
                 rng.fill(&mut value_bytes);
                 Opcode::MStore(offset, U256::from_be_bytes(value_bytes))
             }
             121 => {
-                // NOTE: MLOAD memory offset capped at u16.
-                let offset = rng.u16(..) as u64;
+                let offset = random_memory_offset(rng, memory_offset_limit);
                 Opcode::MLoad(offset)
             }
             122 => {
-                let (offset, length) = random_memory_range(rng);
+                let (offset, length) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::Log0(offset, length)
             }
             123 => {
-                let (offset, length) = random_memory_range(rng);
+                let (offset, length) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::Log1(offset, length, random_topic(rng))
             }
             124 => {
-                let (offset, length) = random_memory_range(rng);
+                let (offset, length) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::Log2(offset, length, random_topic(rng), random_topic(rng))
             }
             125 => {
-                let (offset, length) = random_memory_range(rng);
+                let (offset, length) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::Log3(
                     offset,
                     length,
@@ -1194,7 +1258,8 @@ impl Opcode {
                 )
             }
             126 => {
-                let (offset, length) = random_memory_range(rng);
+                let (offset, length) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::Log4(
                     offset,
                     length,
@@ -1204,52 +1269,56 @@ impl Opcode {
                     random_topic(rng),
                 )
             }
-            127 => Opcode::MStore8(rng.u16(..) as u64, rng.u8(..)),
+            127 => Opcode::MStore8(random_memory_offset(rng, memory_offset_limit), rng.u8(..)),
             128 => {
-                let (dest, src, length) = random_copy_range(rng);
+                let (dest, src, length) =
+                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::MCopy(dest, src, length)
             }
             129 => {
-                let (dest, src, length) = random_copy_range(rng);
+                let (dest, src, length) =
+                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::CallDataCopy(dest, src, length)
             }
             130 => {
-                let (dest, src, length) = random_copy_range(rng);
+                let (dest, src, length) =
+                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::CodeCopy(dest, src, length)
             }
             131 => {
-                let (dest, src, length) = random_copy_range(rng);
+                let (dest, src, length) =
+                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::ExtCodeCopy(random_topic(rng), dest, src, length)
             }
             132 => Opcode::Stop,
-            133 => Opcode::CallDataLoad(rng.u16(..) as u64),
+            133 => Opcode::CallDataLoad(random_memory_offset(rng, memory_offset_limit)),
             134 => {
-                let (offset, length) = random_memory_range(rng);
+                let (offset, length) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::Return(offset, length)
             }
             135 => {
-                let (offset, length) = random_memory_range(rng);
-                Opcode::Revert(offset, length)
-            }
-            136 => {
-                let (offset, length) = random_memory_range(rng);
+                let (offset, length) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::Keccak256(offset, length)
             }
-            137 => Opcode::SelfDestruct(random_topic(rng)),
+            136 => Opcode::SelfDestruct(random_topic(rng)),
             // Placeholder. Real init code is materialized by `Machine::ingest`
             // (which has access to outer gas + RNG) the first time this is
             // ingested; subsequent ingestions of the same value would re-use
             // the populated payload.
-            138 => Opcode::Create(Vec::new()),
+            137 => Opcode::Create(Vec::new()),
             // CREATE2 placeholder; salt is sampled now (it does not depend on
             // outer machine state), init code is materialized lazily.
-            139 => Opcode::Create2(Vec::new(), random_topic(rng)),
+            138 => Opcode::Create2(Vec::new(), random_topic(rng)),
             // CALL placeholder. Memory ranges are sampled now; gas and target
             // address are filled in by `Machine::ingest` (they depend on outer
             // state). The placeholder is detected by `address == Address::ZERO`.
-            140 => {
-                let (args_offset, args_size) = random_memory_range(rng);
-                let (ret_offset, ret_size) = random_memory_range(rng);
+            139 => {
+                let (args_offset, args_size) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                let (ret_offset, ret_size) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::Call {
                     gas: 0,
                     address: Address::ZERO,
@@ -1261,9 +1330,11 @@ impl Opcode {
             }
             // STATICCALL / DELEGATECALL placeholders. Same materialization
             // rules as CALL.
-            141 => {
-                let (args_offset, args_size) = random_memory_range(rng);
-                let (ret_offset, ret_size) = random_memory_range(rng);
+            140 => {
+                let (args_offset, args_size) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                let (ret_offset, ret_size) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::StaticCall {
                     gas: 0,
                     address: Address::ZERO,
@@ -1273,9 +1344,11 @@ impl Opcode {
                     ret_size,
                 }
             }
-            142 => {
-                let (args_offset, args_size) = random_memory_range(rng);
-                let (ret_offset, ret_size) = random_memory_range(rng);
+            141 => {
+                let (args_offset, args_size) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                let (ret_offset, ret_size) =
+                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
                 Opcode::DelegateCall {
                     gas: 0,
                     address: Address::ZERO,
@@ -1285,7 +1358,7 @@ impl Opcode {
                     ret_size,
                 }
             }
-            143 => Opcode::Clz,
+            142 => Opcode::Clz,
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         }
     }
@@ -1472,7 +1545,6 @@ impl Opcode {
                 out
             }
             Opcode::Return(offset, length) => render_return_like(0xF3, *offset, *length),
-            Opcode::Revert(offset, length) => render_return_like(0xFD, *offset, *length),
             Opcode::Keccak256(offset, length) => render_return_like(0x20, *offset, *length),
             Opcode::SelfDestruct(beneficiary) => {
                 let mut out = Vec::with_capacity(1 + 32 + 1);
@@ -1655,7 +1727,7 @@ fn render_call(
 
 /// Renders `[offset, length]` frame-terminating ops:
 /// PUSH8 length ‖ PUSH8 offset ‖ <opcode>. Pushed bottom-up so offset ends up on
-/// top of the stack as RETURN/REVERT expect.
+/// top of the stack as RETURN expects.
 fn render_return_like(opcode: u8, offset: u64, length: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(9 + 9 + 1);
     out.push(0x67); // PUSH8 length
@@ -1703,4 +1775,77 @@ fn render_push(opcode: u8, immediate: &[u8]) -> Vec<u8> {
     v.push(opcode);
     v.extend_from_slice(immediate);
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_zero_memory_limits_force_zero_offsets_and_lengths() {
+        let memory_variant_indices = [
+            120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 133, 134, 135, 139, 140,
+            141,
+        ];
+
+        for idx in memory_variant_indices {
+            let mut rng = Rng::with_seed(idx as u64);
+            let op = Opcode::nth_variant(idx, &mut rng, 0, 0);
+            assert_memory_offsets_and_lengths(&op, 0, 0);
+        }
+    }
+
+    fn assert_memory_offsets_and_lengths(op: &Opcode, expected_offset: u64, expected_length: u64) {
+        match op {
+            Opcode::MStore(offset, _)
+            | Opcode::MLoad(offset)
+            | Opcode::MStore8(offset, _)
+            | Opcode::CallDataLoad(offset) => assert_eq!(*offset, expected_offset),
+            Opcode::Log0(offset, length)
+            | Opcode::Log1(offset, length, _)
+            | Opcode::Log2(offset, length, _, _)
+            | Opcode::Log3(offset, length, _, _, _)
+            | Opcode::Log4(offset, length, _, _, _, _)
+            | Opcode::Return(offset, length)
+            | Opcode::Keccak256(offset, length) => {
+                assert_eq!(*offset, expected_offset);
+                assert_eq!(*length, expected_length);
+            }
+            Opcode::MCopy(dest, src, length)
+            | Opcode::CallDataCopy(dest, src, length)
+            | Opcode::CodeCopy(dest, src, length)
+            | Opcode::ExtCodeCopy(_, dest, src, length) => {
+                assert_eq!(*dest, expected_offset);
+                assert_eq!(*src, expected_offset);
+                assert_eq!(*length, expected_length);
+            }
+            Opcode::Call {
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            }
+            | Opcode::StaticCall {
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            }
+            | Opcode::DelegateCall {
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            } => {
+                assert_eq!(*args_offset, expected_offset);
+                assert_eq!(*args_size, expected_length);
+                assert_eq!(*ret_offset, expected_offset);
+                assert_eq!(*ret_size, expected_length);
+            }
+            _ => panic!("unexpected opcode in memory limit test: {op:?}"),
+        }
+    }
 }
