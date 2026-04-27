@@ -1,4 +1,4 @@
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, U256, keccak256};
 use fastrand::Rng;
 use std::collections::HashMap;
 
@@ -35,6 +35,7 @@ pub struct Machine {
     rng: Rng,
     gas: u64,
     stack: Vec<U256>,
+    address_stack: Vec<Address>,
     call_stack: Vec<Address>,
     nonces: HashMap<Address, u64>,
     memory: u64,
@@ -45,14 +46,29 @@ pub struct Machine {
 impl Machine {
     pub fn new(gas: u64, rng: Rng, config: Config) -> Self {
         let caller = Address::from([0x11; 20]);
+        let current_address = Address::from([0x42; 20]);
+        Self::with_context(gas, rng, config, current_address, caller, 1)
+    }
+
+    fn with_context(
+        gas: u64,
+        rng: Rng,
+        config: Config,
+        current_address: Address,
+        caller: Address,
+        current_nonce: u64,
+    ) -> Self {
+        let mut nonces = HashMap::from([(caller, 0)]);
+        nonces.insert(current_address, current_nonce);
         Self {
             config,
             gas,
             rng,
             memory: 0,
             stack: vec![],
+            address_stack: vec![current_address],
             call_stack: vec![caller],
-            nonces: HashMap::from([(caller, 0)]),
+            nonces,
             bytecode: vec![],
             halted: false,
         }
@@ -72,6 +88,60 @@ impl Machine {
 
     pub fn bytecode_ops(&self) -> &[Opcode] {
         &self.bytecode
+    }
+
+    pub fn created_contracts(&self) -> Vec<Address> {
+        let root_caller = *self
+            .call_stack
+            .first()
+            .expect("machine call stack is always seeded with the root caller");
+        let root_address = *self
+            .address_stack
+            .first()
+            .expect("machine address stack is always seeded with the root contract");
+        let mut created: Vec<_> = self
+            .nonces
+            .keys()
+            .copied()
+            .filter(|address| *address != root_caller && *address != root_address)
+            .collect();
+        created.sort_unstable_by(|left, right| left.as_slice().cmp(right.as_slice()));
+        created
+    }
+
+    fn current_address(&self) -> Address {
+        *self
+            .address_stack
+            .last()
+            .expect("machine address stack is always seeded with the current contract")
+    }
+
+    fn nonce_of(&self, address: Address) -> u64 {
+        *self.nonces.get(&address).unwrap_or(&0)
+    }
+
+    fn bump_nonce(&mut self, address: Address) {
+        let nonce = self.nonces.entry(address).or_insert(0);
+        *nonce = nonce.checked_add(1).expect("nonce overflow");
+    }
+
+    fn record_created_contract(&mut self, op: &Opcode) {
+        match op {
+            Opcode::Create(_init_code) => {
+                let creator = self.current_address();
+                let created_address = create_address(creator, self.nonce_of(creator));
+                self.bump_nonce(creator);
+                self.nonces.entry(created_address).or_insert(1);
+            }
+            Opcode::Create2(init_code, salt) => {
+                let creator = self.current_address();
+                let created_address =
+                    creator.create2_from_code(salt.to_be_bytes::<32>(), init_code);
+                self.bump_nonce(creator);
+                self.nonces.entry(created_address).or_insert(1);
+            }
+            _ => {}
+        }
     }
 
     pub fn ingest(&mut self, op: Opcode) -> anyhow::Result<(), Error> {
@@ -111,6 +181,7 @@ impl Machine {
                     }
                 }
                 self.memory = self.memory.saturating_add(provides.memory());
+                self.record_created_contract(&op);
                 debug_assert!(self.stack.len() <= 1024);
                 let terminating = op.is_terminating();
                 self.bytecode.push(op);
@@ -176,9 +247,17 @@ impl Machine {
         // internal constraint solver and the inner generator don't share state.
         let gen_seed = self.rng.u64(..);
         let machine_seed = self.rng.u64(..);
+        let creator = self.current_address();
         let mut sub_config = self.config.clone();
         sub_config.allow_termination = false;
-        let mut sub_machine = Machine::new(sub_budget, Rng::with_seed(machine_seed), sub_config);
+        let mut sub_machine = Machine::with_context(
+            sub_budget,
+            Rng::with_seed(machine_seed),
+            sub_config,
+            Address::ZERO,
+            creator,
+            1,
+        );
         let mut gen_rng = Rng::with_seed(gen_seed);
         loop {
             let inner = Opcode::generate(&mut gen_rng);
@@ -235,6 +314,41 @@ impl Machine {
     }
 }
 
+fn create_address(caller: Address, nonce: u64) -> Address {
+    let nonce_rlp = rlp_encode_nonce(nonce);
+    let payload_len = 1 + 20 + nonce_rlp.len();
+    let mut out = Vec::with_capacity(1 + payload_len);
+
+    out.push(0xc0 + payload_len as u8);
+    out.push(0x94);
+    out.extend_from_slice(caller.as_slice());
+    out.extend_from_slice(&nonce_rlp);
+
+    Address::from_word(keccak256(out))
+}
+
+fn rlp_encode_nonce(nonce: u64) -> Vec<u8> {
+    if nonce == 0 {
+        return vec![0x80];
+    }
+
+    let bytes = nonce.to_be_bytes();
+    let first_non_zero = bytes
+        .iter()
+        .position(|byte| *byte != 0)
+        .expect("non-zero nonce must have a non-zero byte");
+    let trimmed = &bytes[first_non_zero..];
+
+    if trimmed.len() == 1 && trimmed[0] < 0x80 {
+        vec![trimmed[0]]
+    } else {
+        let mut out = Vec::with_capacity(1 + trimmed.len());
+        out.push(0x80 + trimmed.len() as u8);
+        out.extend_from_slice(trimmed);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +360,39 @@ mod tests {
 
         assert_eq!(machine.call_stack, vec![caller]);
         assert_eq!(machine.nonces.get(&caller), Some(&0));
+    }
+
+    #[test]
+    fn create_updates_nonce_map() {
+        let caller = Address::from([0x11; 20]);
+        let code_addr = Address::from([0x42; 20]);
+        let created = create_address(code_addr, 1);
+        let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
+
+        assert!(
+            machine
+                .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
+                .is_ok()
+        );
+
+        assert_eq!(machine.nonces.get(&caller), Some(&0));
+        assert_eq!(machine.nonces.get(&code_addr), Some(&2));
+        assert_eq!(machine.nonces.get(&created), Some(&1));
+    }
+
+    #[test]
+    fn create2_updates_nonce_map() {
+        let caller = Address::from([0x11; 20]);
+        let code_addr = Address::from([0x42; 20]);
+        let init_code = vec![0x60, 0x00, 0x60, 0x00, 0xF3];
+        let salt = U256::from(0x1234_u64);
+        let created = code_addr.create2_from_code(salt.to_be_bytes::<32>(), &init_code);
+        let mut machine = Machine::new(100_000, Rng::with_seed(11), Config::default());
+
+        assert!(machine.ingest(Opcode::Create2(init_code, salt)).is_ok());
+
+        assert_eq!(machine.nonces.get(&caller), Some(&0));
+        assert_eq!(machine.nonces.get(&code_addr), Some(&2));
+        assert_eq!(machine.nonces.get(&created), Some(&1));
     }
 }

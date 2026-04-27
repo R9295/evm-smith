@@ -30,6 +30,9 @@ fn main() {
             };
         }
         let run_summary = runner::run(&machine.bytecode(), gas as u64);
+        if matches!(&run_summary.result, ExecutionResult::Success { .. }) {
+            assert_machine_state_valid(&machine, &run_summary);
+        }
         for (i, count) in run_summary.opcode_counts.iter().enumerate() {
             totals[i] = totals[i].saturating_add(*count);
         }
@@ -71,6 +74,13 @@ fn main() {
         }
     }
     print_opcode_summary(&totals);
+}
+
+fn assert_machine_state_valid(machine: &Machine, run_summary: &RunSummary) {
+    let machine_created = machine.created_contracts();
+    if machine_created != run_summary.created_contracts {
+        report_state_error(run_summary, &machine_created);
+    }
 }
 
 /// Returns true for opcodes only active under EOF (not on any current mainnet
@@ -122,4 +132,13 @@ fn report_error(run_summary: &RunSummary) {
     eprintln!("opcodes run ({}):", run_summary.trace.len());
     eprintln!("ops: {:?}", run_summary.trace);
     panic!("FATAL ERROR: generator invariant violated");
+}
+
+fn report_state_error(run_summary: &RunSummary, machine_created: &[revm::primitives::Address]) {
+    eprintln!("machine created contracts: {:?}", machine_created);
+    eprintln!(
+        "runtime created contracts: {:?}",
+        run_summary.created_contracts
+    );
+    report_error(run_summary);
 }

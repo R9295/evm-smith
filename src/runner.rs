@@ -6,7 +6,9 @@ use revm::{
     database::CacheDB,
     database_interface::EmptyDB,
     inspector::{InspectEvm, Inspector},
-    interpreter::{Interpreter, InterpreterTypes, interpreter_types::Jumps},
+    interpreter::{
+        CreateInputs, CreateOutcome, Interpreter, InterpreterTypes, interpreter_types::Jumps,
+    },
     primitives::{Address, Bytes, TxKind, U256},
     state::AccountInfo,
 };
@@ -17,13 +19,17 @@ const TX_INTRINSIC_GAS: u64 = 21_000;
 struct OpcodeCoverageInspector {
     opcode_counts: [u64; 256],
     trace: Vec<u8>,
+    root_address: Address,
+    created_contracts: Vec<Address>,
 }
 
-impl Default for OpcodeCoverageInspector {
-    fn default() -> Self {
+impl OpcodeCoverageInspector {
+    fn new(root_address: Address) -> Self {
         Self {
             opcode_counts: [0; 256],
             trace: Vec::new(),
+            root_address,
+            created_contracts: Vec::new(),
         }
     }
 }
@@ -34,6 +40,19 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for OpcodeCoverageInspect
         self.opcode_counts[opcode as usize] += 1;
         self.trace.push(opcode);
     }
+
+    fn create_end(
+        &mut self,
+        _context: &mut CTX,
+        inputs: &CreateInputs,
+        outcome: &mut CreateOutcome,
+    ) {
+        if inputs.caller() == self.root_address && outcome.instruction_result().is_ok() {
+            if let Some(address) = outcome.address {
+                self.created_contracts.push(address);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +60,7 @@ pub struct RunSummary {
     pub result: ExecutionResult,
     pub opcode_counts: [u64; 256],
     pub trace: Vec<String>,
+    pub created_contracts: Vec<Address>,
 }
 
 pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
@@ -57,7 +77,7 @@ pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
     caller_account.balance = caller_balance;
     db.insert_account_info(caller, caller_account);
 
-    let inspector = OpcodeCoverageInspector::default();
+    let inspector = OpcodeCoverageInspector::new(code_addr);
     let ctx = Context::mainnet().with_db(db);
     let mut evm = ctx.build_mainnet_with_inspector(inspector);
 
@@ -75,6 +95,12 @@ pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
         .expect("evm transact failed");
 
     let inspector = evm.inspector;
+    let mut created_contracts = if matches!(result, ExecutionResult::Success { .. }) {
+        inspector.created_contracts
+    } else {
+        Vec::new()
+    };
+    created_contracts.sort_unstable_by(|left, right| left.as_slice().cmp(right.as_slice()));
     let trace = inspector
         .trace
         .iter()
@@ -85,5 +111,30 @@ pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
         result,
         opcode_counts: inspector.opcode_counts,
         trace,
+        created_contracts,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        machine::{Config, Machine},
+        opcodes::Opcode,
+    };
+    use fastrand::Rng;
+
+    #[test]
+    fn run_tracks_created_contracts() {
+        let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
+
+        assert!(
+            machine
+                .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
+                .is_ok()
+        );
+
+        let summary = run(&machine.bytecode(), 100_000);
+        assert_eq!(summary.created_contracts, machine.created_contracts());
     }
 }
