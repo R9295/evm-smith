@@ -1,15 +1,15 @@
-use alloy_primitives::{keccak256, Address};
-use anyhow::{anyhow, bail, Context as _, Result};
+use alloy_primitives::{Address, keccak256};
+use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Parser;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs::{self, File, OpenOptions},
     io::{ErrorKind, Write as _},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant, SystemTime},
@@ -17,7 +17,7 @@ use std::{
 
 use crate::{
     addresses::ExecutionAddresses,
-    machine::{Config, Machine, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT},
+    machine::{Config, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT, Machine},
     opcodes::Opcode,
 };
 

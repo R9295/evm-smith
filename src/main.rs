@@ -48,9 +48,12 @@ fn generated_bytecode_matches_runtime_state() {
         if matches!(&run_summary.result, ExecutionResult::Success { .. }) {
             assert_machine_state_valid(&machine, &run_summary);
         }
+        let mut all_count = 0;
         for (i, count) in run_summary.opcode_counts.iter().enumerate() {
             totals[i] = totals[i].saturating_add(*count);
+            all_count += count;
         }
+        println!("RUN: /dev/shm/evm-fuzz-core-0/bug.json{:?}", all_count);
         match run_summary.result {
             ExecutionResult::Success { .. } => {}
             ExecutionResult::Revert { .. } => {

@@ -1,4 +1,4 @@
-use alloy_primitives::{keccak256, Address, U256};
+use alloy_primitives::{Address, U256, keccak256};
 use fastrand::Rng;
 use std::collections::HashMap;
 
@@ -667,9 +667,11 @@ mod tests {
         let created = create_address(code_addr, 1);
         let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
 
-        assert!(machine
-            .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
-            .is_ok());
+        assert!(
+            machine
+                .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
+                .is_ok()
+        );
 
         assert_eq!(machine.nonces.get(&caller), Some(&1));
         assert_eq!(machine.nonces.get(&code_addr), Some(&2));

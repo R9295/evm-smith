@@ -1,4 +1,5 @@
 use revm::{
+    Context, MainBuilder, MainContext,
     bytecode::{Bytecode, OpCode},
     context::{ContextTr, TxEnv},
     context_interface::result::ExecutionResult,
@@ -7,11 +8,10 @@ use revm::{
     handler::EvmTr,
     inspector::{InspectCommitEvm, Inspector},
     interpreter::{
-        interpreter_types::Jumps, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
+        CreateInputs, CreateOutcome, Interpreter, InterpreterTypes, interpreter_types::Jumps,
     },
     primitives::{Address, Bytes, TxKind, U256},
     state::AccountInfo,
-    Context, MainBuilder, MainContext,
 };
 
 use crate::addresses::ExecutionAddresses;
@@ -173,9 +173,11 @@ mod tests {
     fn run_tracks_created_contracts() {
         let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
 
-        assert!(machine
-            .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
-            .is_ok());
+        assert!(
+            machine
+                .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
+                .is_ok()
+        );
 
         let summary = run(&machine.bytecode(), 100_000);
         assert_eq!(summary.created_contracts, machine.created_contracts());
@@ -194,9 +196,11 @@ mod tests {
         };
         let mut machine = Machine::new(100_000, Rng::with_seed(7), config);
 
-        assert!(machine
-            .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
-            .is_ok());
+        assert!(
+            machine
+                .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
+                .is_ok()
+        );
 
         let summary = run_with_addresses(&machine.bytecode(), 100_000, addresses);
         assert_eq!(summary.created_contracts, machine.created_contracts());
