@@ -540,6 +540,19 @@ impl Opcode {
         }
     }
 
+    /// Returns true for opcodes that halt the current execution frame on
+    /// commit (STOP, INVALID, RETURN, REVERT, SELFDESTRUCT).
+    pub fn is_terminating(&self) -> bool {
+        matches!(
+            self,
+            Opcode::Stop
+                | Opcode::Invalid
+                | Opcode::Return(..)
+                | Opcode::Revert(..)
+                | Opcode::SelfDestruct(..)
+        )
+    }
+
     pub fn provides(&self, machine: &Machine) -> Resource {
         match self {
             Opcode::Pop

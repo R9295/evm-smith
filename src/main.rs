@@ -4,7 +4,7 @@ mod opcodes;
 mod runner;
 
 use crate::{
-    machine::Machine,
+    machine::{Config, Machine},
     opcodes::{Opcode},
     runner::RunSummary,
 };
@@ -22,7 +22,7 @@ fn main() {
     for _ in 0..1000 {
         let machine_rand = fastrand::Rng::with_seed(seed);
         let gas = 3_00_000;
-        let mut machine = Machine::new(gas, machine_rand);
+        let mut machine = Machine::new(gas, machine_rand, Config::default());
         loop {
             let op = Opcode::generate(&mut rand);
             let Ok(_) = machine.ingest(op) else {

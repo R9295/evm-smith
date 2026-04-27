@@ -6,8 +6,31 @@ use crate::{
     opcodes::{Opcode, Resource},
 };
 
+/// Tunables for the symbolic generator.
+#[derive(Debug, Clone)]
+pub struct Config {
+    /// Fraction of the *remaining* gas budgeted for the CREATE/CREATE2 sub-call,
+    /// expressed as a percent in `0..=100`. Reserved for the upcoming CREATE
+    /// opcode wiring.
+    pub create_gas_percentage: u8,
+    /// When `false`, terminating ops (STOP / INVALID / RETURN / REVERT /
+    /// SELFDESTRUCT) drawn by the generator are silently skipped instead of
+    /// halting the machine.
+    pub allow_termination: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            create_gas_percentage: 50,
+            allow_termination: true,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Machine {
+    config: Config,
     rng: Rng,
     gas: u64,
     stack: Vec<U256>,
@@ -17,8 +40,9 @@ pub struct Machine {
 }
 
 impl Machine {
-    pub fn new(gas: u64, rng: Rng) -> Self {
+    pub fn new(gas: u64, rng: Rng, config: Config) -> Self {
         Self {
+            config,
             gas,
             rng,
             memory: 0,
@@ -35,6 +59,9 @@ impl Machine {
     pub fn ingest(&mut self, op: Opcode) -> anyhow::Result<(), Error> {
         if self.halted {
             return Err(Error::HaltConditionEncountered);
+        }
+        if !self.config.allow_termination && op.is_terminating() {
+            return Ok(());
         }
         let mut stack = vec![op];
         while let Some(op) = stack.pop() {
@@ -56,14 +83,7 @@ impl Machine {
                 self.memory = self.memory.saturating_add(provides.memory());
                 debug_assert!(self.stack.len() <= 1024);
                 self.bytecode.push(op);
-                if matches!(
-                    op,
-                    Opcode::Stop
-                        | Opcode::Invalid
-                        | Opcode::Return(..)
-                        | Opcode::Revert(..)
-                        | Opcode::SelfDestruct(..)
-                ) {
+                if op.is_terminating() {
                     self.halted = true;
                     return Err(Error::HaltConditionEncountered);
                 }
