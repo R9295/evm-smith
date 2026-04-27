@@ -10,7 +10,7 @@ Sub-machines (built by `build_generated_submachine` for a CREATE / CREATE2
 init code) inherit a snapshot of the parent's `callable_addresses` and run
 with `Config::grow_callable_on_create = false`. They can call:
 
-- the root caller (`0x11..11`)
+- the configured root caller (defaults to `0x11..11`)
 - any contract the root deployed *before* the sub-machine was constructed
 - any contract any *ancestor* deployed before the current branch
 

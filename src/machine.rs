@@ -1,8 +1,9 @@
-use alloy_primitives::{Address, U256, keccak256};
+use alloy_primitives::{keccak256, Address, U256};
 use fastrand::Rng;
 use std::collections::HashMap;
 
 use crate::{
+    addresses::ExecutionAddresses,
     error::Error,
     opcodes::{Opcode, Resource},
 };
@@ -10,6 +11,8 @@ use crate::{
 /// Tunables for the symbolic generator.
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// Root transaction caller and contract addresses.
+    pub addresses: ExecutionAddresses,
     /// Fraction of the *remaining* gas budgeted for the CREATE/CREATE2 sub-call,
     /// expressed as a percent in `0..=100`. Reserved for the upcoming CREATE
     /// opcode wiring.
@@ -29,6 +32,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            addresses: ExecutionAddresses::default(),
             create_gas_percentage: 50,
             allow_termination: true,
             grow_callable_on_create: true,
@@ -66,8 +70,9 @@ struct CreatedContractState {
 
 impl Machine {
     pub fn new(gas: u64, rng: Rng, config: Config) -> Self {
-        let caller = Address::from([0x11; 20]);
-        let current_address = Address::from([0x42; 20]);
+        config.addresses.assert_valid();
+        let caller = config.addresses.caller;
+        let current_address = config.addresses.contract;
         // Root: the only safe initial CALL target is `caller` (a pre-funded
         // EOA with no code). `current_address` is the test contract — it has
         // code, so excluded.
@@ -612,7 +617,8 @@ mod tests {
 
     #[test]
     fn new_machine_initializes_caller_state() {
-        let caller = Address::from([0x11; 20]);
+        let addresses = ExecutionAddresses::default();
+        let caller = addresses.caller;
         let machine = Machine::new(1, Rng::with_seed(7), Config::default());
 
         assert_eq!(machine.call_stack, vec![caller]);
@@ -620,17 +626,35 @@ mod tests {
     }
 
     #[test]
+    fn new_machine_uses_configured_addresses() {
+        let addresses = ExecutionAddresses {
+            caller: Address::from([0xAA; 20]),
+            contract: Address::from([0xBB; 20]),
+        };
+        let config = Config {
+            addresses,
+            ..Config::default()
+        };
+        let machine = Machine::new(1, Rng::with_seed(7), config);
+
+        assert_eq!(machine.call_stack, vec![addresses.caller]);
+        assert_eq!(machine.address_stack, vec![addresses.contract]);
+        assert_eq!(machine.callable_addresses, vec![addresses.caller]);
+        assert_eq!(machine.nonces.get(&addresses.caller), Some(&1));
+        assert_eq!(machine.nonces.get(&addresses.contract), Some(&1));
+    }
+
+    #[test]
     fn create_updates_nonce_map() {
-        let caller = Address::from([0x11; 20]);
-        let code_addr = Address::from([0x42; 20]);
+        let addresses = ExecutionAddresses::default();
+        let caller = addresses.caller;
+        let code_addr = addresses.contract;
         let created = create_address(code_addr, 1);
         let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
 
-        assert!(
-            machine
-                .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
-                .is_ok()
-        );
+        assert!(machine
+            .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
+            .is_ok());
 
         assert_eq!(machine.nonces.get(&caller), Some(&1));
         assert_eq!(machine.nonces.get(&code_addr), Some(&2));
@@ -639,8 +663,9 @@ mod tests {
 
     #[test]
     fn create2_updates_nonce_map() {
-        let caller = Address::from([0x11; 20]);
-        let code_addr = Address::from([0x42; 20]);
+        let addresses = ExecutionAddresses::default();
+        let caller = addresses.caller;
+        let code_addr = addresses.contract;
         let init_code = vec![0x60, 0x00, 0x60, 0x00, 0xF3];
         let salt = U256::from(0x1234_u64);
         let created = code_addr.create2_from_code(salt.to_be_bytes::<32>(), &init_code);
@@ -712,8 +737,7 @@ mod tests {
         assert_eq!(probe.callable_addresses[0], caller);
         assert_eq!(finalised.callable_addresses[0], caller);
         assert_ne!(
-            probe.callable_addresses[1],
-            finalised.callable_addresses[1],
+            probe.callable_addresses[1], finalised.callable_addresses[1],
             "nested CREATE leaks current_address into callable_addresses"
         );
 

@@ -1,5 +1,4 @@
 use revm::{
-    Context, MainBuilder, MainContext,
     bytecode::{Bytecode, OpCode},
     context::{ContextTr, TxEnv},
     context_interface::result::ExecutionResult,
@@ -8,14 +7,17 @@ use revm::{
     handler::EvmTr,
     inspector::{InspectCommitEvm, Inspector},
     interpreter::{
-        CreateInputs, CreateOutcome, Interpreter, InterpreterTypes, interpreter_types::Jumps,
+        interpreter_types::Jumps, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
     },
     primitives::{Address, Bytes, TxKind, U256},
     state::AccountInfo,
+    Context, MainBuilder, MainContext,
 };
 
+use crate::addresses::ExecutionAddresses;
+
 /// Intrinsic gas cost for a plain CALL transaction (EIP-2028 baseline).
-const TX_INTRINSIC_GAS: u64 = 21_000;
+pub const TX_INTRINSIC_GAS: u64 = 21_000;
 
 struct OpcodeCoverageInspector {
     opcode_counts: [u64; 256],
@@ -66,8 +68,17 @@ pub struct RunSummary {
 }
 
 pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
-    let code_addr = Address::from([0x42; 20]);
-    let caller = Address::from([0x11; 20]);
+    run_with_addresses(bytecode, gas_budget, ExecutionAddresses::default())
+}
+
+pub fn run_with_addresses(
+    bytecode: &[u8],
+    gas_budget: u64,
+    addresses: ExecutionAddresses,
+) -> RunSummary {
+    addresses.assert_valid();
+    let code_addr = addresses.contract;
+    let caller = addresses.caller;
     let call_value = U256::from(1_000_000_000_000_000_000u128); // 1 ETH
 
     let code = Bytecode::new_raw(Bytes::copy_from_slice(bytecode));
@@ -151,6 +162,7 @@ fn account_nonce(db: &CacheDB<EmptyDB>, address: Address) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::addresses::ExecutionAddresses;
     use crate::{
         machine::{Config, Machine},
         opcodes::Opcode,
@@ -161,13 +173,32 @@ mod tests {
     fn run_tracks_created_contracts() {
         let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
 
-        assert!(
-            machine
-                .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
-                .is_ok()
-        );
+        assert!(machine
+            .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
+            .is_ok());
 
         let summary = run(&machine.bytecode(), 100_000);
+        assert_eq!(summary.created_contracts, machine.created_contracts());
+        assert_eq!(summary.nonces, machine.nonce_snapshot());
+    }
+
+    #[test]
+    fn run_uses_configured_addresses() {
+        let addresses = ExecutionAddresses {
+            caller: Address::from([0xAA; 20]),
+            contract: Address::from([0xBB; 20]),
+        };
+        let config = Config {
+            addresses,
+            ..Config::default()
+        };
+        let mut machine = Machine::new(100_000, Rng::with_seed(7), config);
+
+        assert!(machine
+            .ingest(Opcode::Create(vec![0x60, 0x00, 0x60, 0x00, 0xF3]))
+            .is_ok());
+
+        let summary = run_with_addresses(&machine.bytecode(), 100_000, addresses);
         assert_eq!(summary.created_contracts, machine.created_contracts());
         assert_eq!(summary.nonces, machine.nonce_snapshot());
     }

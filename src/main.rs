@@ -1,35 +1,46 @@
+#![allow(dead_code)]
+
+mod addresses;
 mod error;
+mod fuzz;
 mod machine;
 mod opcodes;
 mod runner;
 
-use crate::{
-    machine::{Config, Machine},
-    opcodes::Opcode,
-    runner::RunSummary,
-};
+use crate::{machine::Machine, runner::RunSummary};
+use clap::Parser as _;
 use revm::bytecode::OpCode;
-use revm::context_interface::result::{ExecutionResult, HaltReason, OutOfGasError};
-use std::time::SystemTime;
 
-fn main() {
+fn main() -> anyhow::Result<()> {
+    let cli = fuzz::Cli::parse();
+    fuzz::run(cli)
+}
+
+#[test]
+fn generated_bytecode_matches_runtime_state() {
+    use crate::{machine::Config, opcodes::Opcode};
+    use revm::context_interface::result::{ExecutionResult, HaltReason, OutOfGasError};
+    use std::time::SystemTime;
+
     let seed = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let mut rand = fastrand::Rng::with_seed(seed.clone());
     let mut totals = [0u64; 256];
+    let config = Config::default();
     for _ in 0..1000 {
         let machine_rand = fastrand::Rng::with_seed(seed);
         let gas = 3_000_000;
-        let mut machine = Machine::new(gas, machine_rand, Config::default());
+        let mut machine = Machine::new(gas, machine_rand, config.clone());
         loop {
             let op = Opcode::generate(&mut rand);
             let Ok(_) = machine.ingest(op) else {
                 break;
             };
         }
-        let run_summary = runner::run(&machine.bytecode(), gas as u64);
+        let run_summary =
+            runner::run_with_addresses(&machine.bytecode(), gas as u64, config.addresses);
         if matches!(&run_summary.result, ExecutionResult::Success { .. }) {
             assert_machine_state_valid(&machine, &run_summary);
         }
