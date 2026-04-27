@@ -7,6 +7,10 @@ use std::{
     io::{ErrorKind, Write as _},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -24,10 +28,10 @@ const DEFAULT_SENDER_SK: [u8; 32] = [
 ];
 
 const FORK: &str = "Osaka";
-const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 10;
 const POLL_INTERVAL: Duration = Duration::from_micros(100);
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(
     about = "Cross-client state-test fuzzer driving geth, nethermind, and besu in shared-memory server mode."
 )]
@@ -47,6 +51,12 @@ pub struct Cli {
     /// Generator gas budget per iteration.
     #[arg(long, default_value_t = 3_000_000)]
     pub gas: u32,
+    /// Number of parallel worker triplets to run.
+    #[arg(long, default_value_t = 1)]
+    pub cores: usize,
+    /// Per-client timeout per iteration, in seconds.
+    #[arg(long, default_value_t = DEFAULT_CLIENT_TIMEOUT_SECS)]
+    pub timeout: u64,
     /// Exit non-zero on the first FAIL or root mismatch.
     #[arg(long, default_value_t = false)]
     pub bail: bool,
@@ -315,6 +325,44 @@ enum ClientResult {
     Fail(String),
 }
 
+struct RunOneOutput {
+    results: [ClientResult; 3],
+    output: String,
+}
+
+struct SharedState {
+    next_iter: AtomicU64,
+    completed: AtomicU64,
+    mismatches: AtomicU64,
+    fails: AtomicU64,
+    stop: AtomicBool,
+    print_lock: Mutex<()>,
+}
+
+impl SharedState {
+    fn new() -> Self {
+        Self {
+            next_iter: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
+            mismatches: AtomicU64::new(0),
+            fails: AtomicU64::new(0),
+            stop: AtomicBool::new(false),
+            print_lock: Mutex::new(()),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WorkerContext {
+    id: usize,
+    cli: Cli,
+    seed: u64,
+    sender: Address,
+    sender_sk: [u8; 32],
+    config: Config,
+    shared: Arc<SharedState>,
+}
+
 fn parse_ok_payload(payload: &str) -> OkResult {
     let mut lines = payload.lines();
     let state_root = lines.next().unwrap_or("").trim().to_string();
@@ -331,7 +379,10 @@ fn run_one(
     sender: Address,
     sender_sk: &[u8; 32],
     gas: u32,
-) -> Result<[ClientResult; 3]> {
+    timeout: Duration,
+    worker_id: usize,
+    iter: u64,
+) -> Result<RunOneOutput> {
     let json_val = build_state_test_json(bytecode, sender, sender_sk, gas);
     let json_bytes = serde_json::to_vec(&json_val)?;
 
@@ -343,10 +394,11 @@ fn run_one(
     for (i, srv) in servers.iter().enumerate() {
         atomic_write(&srv.signal_path, b"START")
             .with_context(|| format!("writing START for {}", srv.kind.name()))?;
-        deadlines[i] = Instant::now() + CLIENT_TIMEOUT;
+        deadlines[i] = Instant::now() + timeout;
     }
 
     let mut done: [Option<ClientResult>; 3] = [None, None, None];
+    let mut output = String::new();
     loop {
         let mut all_done = true;
         for (i, srv) in servers.iter_mut().enumerate() {
@@ -366,7 +418,11 @@ fn run_one(
             match srv.read_signal().as_str() {
                 "OK" => match srv.read_data() {
                     Ok(payload) => {
-                        println!("{}\n{}", srv.kind.name(), payload);
+                        output.push_str(&format!(
+                            "worker {worker_id} iter {iter} {}\n{}\n",
+                            srv.kind.name(),
+                            payload
+                        ));
                         done[i] = Some(ClientResult::Ok(parse_ok_payload(&payload)))
                     }
                     Err(e) => {
@@ -384,7 +440,7 @@ fn run_one(
                         let name = srv.kind.name();
                         done[i] = Some(ClientResult::Fail(format!(
                             "{name} timed out after {} seconds",
-                            CLIENT_TIMEOUT.as_secs()
+                            timeout.as_secs()
                         )));
                         srv.restart()
                             .with_context(|| format!("restarting {name} after timeout"))?;
@@ -400,12 +456,176 @@ fn run_one(
         thread::sleep(POLL_INTERVAL);
     }
 
-    Ok(done.map(|o| o.expect("all_done loop guarantees Some")))
+    Ok(RunOneOutput {
+        results: done.map(|o| o.expect("all_done loop guarantees Some")),
+        output,
+    })
+}
+
+fn generate_bytecode(iter: u64, seed: u64, gas: u32, config: &Config) -> Vec<u8> {
+    let machine_seed = seed.wrapping_add(iter);
+    let mut machine = Machine::new(
+        gas as u64,
+        fastrand::Rng::with_seed(machine_seed),
+        config.clone(),
+    );
+    let mut rand = fastrand::Rng::with_seed(machine_seed);
+    loop {
+        let op = Opcode::generate(&mut rand);
+        if machine.ingest(op).is_err() {
+            break;
+        }
+    }
+    machine.bytecode()
+}
+
+fn print_locked(shared: &SharedState, output: &str) {
+    let _guard = shared.print_lock.lock().expect("print lock poisoned");
+    print!("{output}");
+}
+
+fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64) -> Result<()> {
+    let machine_seed = ctx.seed.wrapping_add(iter);
+    let bytecode = generate_bytecode(iter, ctx.seed, ctx.cli.gas, &ctx.config);
+    let timeout = Duration::from_secs(ctx.cli.timeout);
+
+    let RunOneOutput {
+        results,
+        mut output,
+    } = run_one(
+        servers,
+        &bytecode,
+        ctx.sender,
+        &ctx.sender_sk,
+        ctx.cli.gas,
+        timeout,
+        ctx.id,
+        iter,
+    )?;
+    ctx.shared.completed.fetch_add(1, Ordering::Relaxed);
+
+    let mut oks: Vec<&OkResult> = Vec::with_capacity(3);
+    let mut any_fail = false;
+    for r in results.iter() {
+        match r {
+            ClientResult::Ok(ok) => oks.push(ok),
+            ClientResult::Fail(_) => any_fail = true,
+        }
+    }
+
+    let mut printed = false;
+    if any_fail {
+        ctx.shared.fails.fetch_add(1, Ordering::Relaxed);
+        output.push_str(&format!(
+            "worker {} iter {iter} (seed {machine_seed}): FAIL\n",
+            ctx.id
+        ));
+        for (i, r) in results.iter().enumerate() {
+            let name = servers[i].kind.name();
+            match r {
+                ClientResult::Ok(ok) => output.push_str(&format!(
+                    "  {name}: OK state={} logs={}\n",
+                    ok.state_root, ok.logs_hash
+                )),
+                ClientResult::Fail(err) => {
+                    let one_line: String =
+                        err.lines().next().unwrap_or("").chars().take(200).collect();
+                    output.push_str(&format!("  {name}: FAIL {one_line}\n"));
+                }
+            }
+        }
+        output.push_str(&format!("  bytecode: {}\n", hex0x(&bytecode)));
+        print_locked(&ctx.shared, &output);
+        printed = true;
+        if ctx.cli.bail {
+            ctx.shared.stop.store(true, Ordering::SeqCst);
+            bail!("--bail: exiting on FAIL at iter {iter}");
+        }
+    } else {
+        let first = oks[0];
+        let state_match = oks.iter().all(|o| o.state_root == first.state_root);
+        let logs_match = oks.iter().all(|o| o.logs_hash == first.logs_hash);
+        if state_match && logs_match {
+            if iter % 100 == 0 {
+                output.push_str(&format!(
+                    "worker {} iter {iter} (seed {machine_seed}): OK state={} logs={}\n",
+                    ctx.id, first.state_root, first.logs_hash
+                ));
+            }
+        } else {
+            ctx.shared.mismatches.fetch_add(1, Ordering::Relaxed);
+            let kind = if !state_match && !logs_match {
+                "STATE+LOGS MISMATCH"
+            } else if !state_match {
+                "STATE ROOT MISMATCH"
+            } else {
+                "LOGS HASH MISMATCH"
+            };
+            output.push_str(&format!(
+                "worker {} iter {iter} (seed {machine_seed}): {kind}\n",
+                ctx.id
+            ));
+            for (i, ok) in oks.iter().enumerate() {
+                output.push_str(&format!(
+                    "  {}: state={} logs={}\n",
+                    servers[i].kind.name(),
+                    ok.state_root,
+                    ok.logs_hash
+                ));
+            }
+            output.push_str(&format!("  bytecode: {}\n", hex0x(&bytecode)));
+            print_locked(&ctx.shared, &output);
+            printed = true;
+            if ctx.cli.bail {
+                ctx.shared.stop.store(true, Ordering::SeqCst);
+                bail!("--bail: exiting on {kind} at iter {iter}");
+            }
+        }
+    }
+
+    if !printed && !output.is_empty() {
+        print_locked(&ctx.shared, &output);
+    }
+
+    Ok(())
+}
+
+fn run_worker(ctx: WorkerContext) -> Result<()> {
+    let workdir = create_random_workdir()?;
+    print_locked(
+        &ctx.shared,
+        &format!("worker {} workdir: {}\n", ctx.id, workdir.display()),
+    );
+
+    let mut servers: [ClientServer; 3] = [
+        ClientServer::spawn(&ctx.cli.geth_path, ClientKind::Geth, &workdir)?,
+        ClientServer::spawn(&ctx.cli.nethermind_path, ClientKind::Nethermind, &workdir)?,
+        ClientServer::spawn(&ctx.cli.besu_path, ClientKind::Besu, &workdir)?,
+    ];
+
+    loop {
+        if ctx.shared.stop.load(Ordering::SeqCst) {
+            break;
+        }
+
+        let iter = ctx.shared.next_iter.fetch_add(1, Ordering::Relaxed);
+        if ctx.cli.count > 0 && iter >= ctx.cli.count {
+            break;
+        }
+
+        run_iteration(&ctx, &mut servers, iter)?;
+    }
+
+    Ok(())
 }
 
 pub fn run(cli: Cli) -> Result<()> {
-    let workdir = create_random_workdir()?;
-    println!("workdir: {}", workdir.display());
+    if cli.cores == 0 {
+        bail!("--cores must be greater than 0");
+    }
+    if cli.timeout == 0 {
+        bail!("--timeout must be greater than 0");
+    }
 
     let sender_sk = DEFAULT_SENDER_SK;
     let sender = derive_sender(&sender_sk)?;
@@ -425,106 +645,56 @@ pub fn run(cli: Cli) -> Result<()> {
             .as_secs()
     });
     println!("seed: {seed}");
+    println!("cores: {}", cli.cores);
+    println!("timeout: {}s", cli.timeout);
 
-    let mut servers: [ClientServer; 3] = [
-        ClientServer::spawn(&cli.geth_path, ClientKind::Geth, &workdir)?,
-        ClientServer::spawn(&cli.nethermind_path, ClientKind::Nethermind, &workdir)?,
-        ClientServer::spawn(&cli.besu_path, ClientKind::Besu, &workdir)?,
-    ];
-
-    let mut iter: u64 = 0;
-    let mut mismatches: u64 = 0;
-    let mut fails: u64 = 0;
-    loop {
-        if cli.count > 0 && iter >= cli.count {
-            break;
-        }
-
-        let machine_seed = seed.wrapping_add(iter);
-        let mut machine = Machine::new(
-            cli.gas as u64,
-            fastrand::Rng::with_seed(machine_seed),
-            config.clone(),
-        );
-        let mut rand = fastrand::Rng::with_seed(machine_seed);
-        loop {
-            let op = Opcode::generate(&mut rand);
-            if machine.ingest(op).is_err() {
-                break;
+    let shared = Arc::new(SharedState::new());
+    let mut handles = Vec::with_capacity(cli.cores);
+    for id in 0..cli.cores {
+        let ctx = WorkerContext {
+            id,
+            cli: cli.clone(),
+            seed,
+            sender,
+            sender_sk,
+            config: config.clone(),
+            shared: Arc::clone(&shared),
+        };
+        let shared_for_error = Arc::clone(&shared);
+        handles.push(thread::spawn(move || {
+            let result = run_worker(ctx);
+            if result.is_err() {
+                shared_for_error.stop.store(true, Ordering::SeqCst);
             }
-        }
-        let bytecode = machine.bytecode();
-
-        let results = run_one(&mut servers, &bytecode, sender, &sender_sk, cli.gas)?;
-
-        let mut oks: Vec<&OkResult> = Vec::with_capacity(3);
-        let mut any_fail = false;
-        for r in results.iter() {
-            match r {
-                ClientResult::Ok(ok) => oks.push(ok),
-                ClientResult::Fail(_) => any_fail = true,
-            }
-        }
-
-        if any_fail {
-            fails += 1;
-            println!("iter {iter} (seed {machine_seed}): FAIL");
-            for (i, r) in results.iter().enumerate() {
-                let name = servers[i].kind.name();
-                match r {
-                    ClientResult::Ok(ok) => {
-                        println!("  {name}: OK state={} logs={}", ok.state_root, ok.logs_hash)
-                    }
-                    ClientResult::Fail(err) => {
-                        let one_line: String =
-                            err.lines().next().unwrap_or("").chars().take(200).collect();
-                        println!("  {name}: FAIL {one_line}");
-                    }
-                }
-            }
-            println!("  bytecode: {}", hex0x(&bytecode));
-            if cli.bail {
-                bail!("--bail: exiting on FAIL at iter {iter}");
-            }
-        } else {
-            let first = oks[0];
-            let state_match = oks.iter().all(|o| o.state_root == first.state_root);
-            let logs_match = oks.iter().all(|o| o.logs_hash == first.logs_hash);
-            if state_match && logs_match {
-                if iter % 100 == 0 {
-                    println!(
-                        "iter {iter} (seed {machine_seed}): OK state={} logs={}",
-                        first.state_root, first.logs_hash
-                    );
-                }
-            } else {
-                mismatches += 1;
-                let kind = if !state_match && !logs_match {
-                    "STATE+LOGS MISMATCH"
-                } else if !state_match {
-                    "STATE ROOT MISMATCH"
-                } else {
-                    "LOGS HASH MISMATCH"
-                };
-                println!("iter {iter} (seed {machine_seed}): {kind}");
-                for (i, ok) in oks.iter().enumerate() {
-                    println!(
-                        "  {}: state={} logs={}",
-                        servers[i].kind.name(),
-                        ok.state_root,
-                        ok.logs_hash
-                    );
-                }
-                println!("  bytecode: {}", hex0x(&bytecode));
-                if cli.bail {
-                    bail!("--bail: exiting on {kind} at iter {iter}");
-                }
-            }
-        }
-
-        iter += 1;
+            result
+        }));
     }
 
+    let mut first_error = None;
+    for handle in handles {
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+            Err(_) => {
+                if first_error.is_none() {
+                    first_error = Some(anyhow!("worker thread panicked"));
+                }
+            }
+        }
+    }
+
+    let iter = shared.completed.load(Ordering::Relaxed);
+    let mismatches = shared.mismatches.load(Ordering::Relaxed);
+    let fails = shared.fails.load(Ordering::Relaxed);
     println!("done: {iter} iterations, {mismatches} root mismatches, {fails} fails");
-    Ok(())
+
+    if let Some(e) = first_error {
+        Err(e)
+    } else {
+        Ok(())
+    }
 }
