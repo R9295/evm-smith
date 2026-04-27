@@ -1,14 +1,14 @@
 use revm::{
+    Context, MainBuilder, MainContext,
     bytecode::{Bytecode, OpCode},
     context::TxEnv,
     context_interface::result::ExecutionResult,
     database::CacheDB,
     database_interface::EmptyDB,
     inspector::{InspectEvm, Inspector},
-    interpreter::{interpreter_types::Jumps, Interpreter, InterpreterTypes},
+    interpreter::{Interpreter, InterpreterTypes, interpreter_types::Jumps},
     primitives::{Address, Bytes, TxKind, U256},
     state::AccountInfo,
-    Context, MainBuilder, MainContext,
 };
 
 /// Intrinsic gas cost for a plain CALL transaction (EIP-2028 baseline).

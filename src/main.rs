@@ -5,7 +5,7 @@ mod runner;
 
 use crate::{
     machine::{Config, Machine},
-    opcodes::{Opcode},
+    opcodes::Opcode,
     runner::RunSummary,
 };
 use revm::bytecode::OpCode;

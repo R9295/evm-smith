@@ -1,5 +1,6 @@
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use fastrand::Rng;
+use std::collections::HashMap;
 
 use crate::{
     error::Error,
@@ -34,6 +35,8 @@ pub struct Machine {
     rng: Rng,
     gas: u64,
     stack: Vec<U256>,
+    call_stack: Vec<Address>,
+    nonces: HashMap<Address, u64>,
     memory: u64,
     bytecode: Vec<Opcode>,
     halted: bool,
@@ -41,12 +44,15 @@ pub struct Machine {
 
 impl Machine {
     pub fn new(gas: u64, rng: Rng, config: Config) -> Self {
+        let caller = Address::from([0x11; 20]);
         Self {
             config,
             gas,
             rng,
             memory: 0,
             stack: vec![],
+            call_stack: vec![caller],
+            nonces: HashMap::from([(caller, 0)]),
             bytecode: vec![],
             halted: false,
         }
@@ -226,5 +232,19 @@ impl Machine {
                     .build(),
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_machine_initializes_caller_state() {
+        let caller = Address::from([0x11; 20]);
+        let machine = Machine::new(1, Rng::with_seed(7), Config::default());
+
+        assert_eq!(machine.call_stack, vec![caller]);
+        assert_eq!(machine.nonces.get(&caller), Some(&0));
     }
 }

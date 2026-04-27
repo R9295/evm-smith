@@ -429,82 +429,105 @@ impl Opcode {
             // Peak stack rise = 2 (the two embedded PUSHes before MSTORE pops them).
             Opcode::MStore(offset, _value) => {
                 let new_size = round_up_to_word(offset.saturating_add(32));
-                let expansion = memory_word_cost(new_size)
-                    .saturating_sub(memory_word_cost(machine.memory()));
-                Resource::builder().stack_reserved(2).gas(9 + expansion).build()
+                let expansion =
+                    memory_word_cost(new_size).saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder()
+                    .stack_reserved(2)
+                    .gas(9 + expansion)
+                    .build()
             }
             // Rendered as PUSH8 offset (3) + MLOAD (3 + memory expansion). Peak rise = 1.
             Opcode::MLoad(offset) => {
                 let new_size = round_up_to_word(offset.saturating_add(32));
-                let expansion = memory_word_cost(new_size)
-                    .saturating_sub(memory_word_cost(machine.memory()));
-                Resource::builder().stack_reserved(1).gas(6 + expansion).build()
+                let expansion =
+                    memory_word_cost(new_size).saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder()
+                    .stack_reserved(1)
+                    .gas(6 + expansion)
+                    .build()
             }
             // LOG_N: (N+2) embedded pushes (3 gas each) + 375*(N+1) base + 8*length + expansion.
             // Peak rise = N+2 (all embedded pushes accumulate before LOG_N pops them).
             Opcode::Log0(offset, length) => {
                 let needed = memory_range_size(*offset, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (0 + 2);
                 let log_gas = 375 * (0 + 1) + 8u64.saturating_mul(*length);
-                Resource::builder().stack_reserved(2).gas(push_gas + log_gas + expansion).build()
+                Resource::builder()
+                    .stack_reserved(2)
+                    .gas(push_gas + log_gas + expansion)
+                    .build()
             }
             Opcode::Log1(offset, length, _) => {
                 let needed = memory_range_size(*offset, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (1 + 2);
                 let log_gas = 375 * (1 + 1) + 8u64.saturating_mul(*length);
-                Resource::builder().stack_reserved(3).gas(push_gas + log_gas + expansion).build()
+                Resource::builder()
+                    .stack_reserved(3)
+                    .gas(push_gas + log_gas + expansion)
+                    .build()
             }
             Opcode::Log2(offset, length, _, _) => {
                 let needed = memory_range_size(*offset, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (2 + 2);
                 let log_gas = 375 * (2 + 1) + 8u64.saturating_mul(*length);
-                Resource::builder().stack_reserved(4).gas(push_gas + log_gas + expansion).build()
+                Resource::builder()
+                    .stack_reserved(4)
+                    .gas(push_gas + log_gas + expansion)
+                    .build()
             }
             Opcode::Log3(offset, length, _, _, _) => {
                 let needed = memory_range_size(*offset, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (3 + 2);
                 let log_gas = 375 * (3 + 1) + 8u64.saturating_mul(*length);
-                Resource::builder().stack_reserved(5).gas(push_gas + log_gas + expansion).build()
+                Resource::builder()
+                    .stack_reserved(5)
+                    .gas(push_gas + log_gas + expansion)
+                    .build()
             }
             Opcode::Log4(offset, length, _, _, _, _) => {
                 let needed = memory_range_size(*offset, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (4 + 2);
                 let log_gas = 375 * (4 + 1) + 8u64.saturating_mul(*length);
-                Resource::builder().stack_reserved(6).gas(push_gas + log_gas + expansion).build()
+                Resource::builder()
+                    .stack_reserved(6)
+                    .gas(push_gas + log_gas + expansion)
+                    .build()
             }
             // PUSH1 byte (3) + PUSH8 offset (3) + MSTORE8 (3 + memory expansion). Peak rise = 2.
             Opcode::MStore8(offset, _byte) => {
                 let new_size = round_up_to_word(offset.saturating_add(1));
-                let expansion = memory_word_cost(new_size)
-                    .saturating_sub(memory_word_cost(machine.memory()));
-                Resource::builder().stack_reserved(2).gas(9 + expansion).build()
+                let expansion =
+                    memory_word_cost(new_size).saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder()
+                    .stack_reserved(2)
+                    .gas(9 + expansion)
+                    .build()
             }
             // 3 PUSH8 (9) + MCOPY (3 + 3·words(length) + expansion over both regions). Peak rise = 3.
             Opcode::MCopy(dest, src, length) => {
                 let needed = copy_memory_size_two(*dest, *src, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 Resource::builder()
                     .stack_reserved(3)
                     .gas(12 + copy_word_gas(*length) + expansion)
                     .build()
             }
             // 3 PUSH8 (9) + COPY_OP (3 + 3·words(length) + expansion to dest+length). Peak rise = 3.
-            Opcode::CallDataCopy(dest, _src, length)
-            | Opcode::CodeCopy(dest, _src, length) => {
+            Opcode::CallDataCopy(dest, _src, length) | Opcode::CodeCopy(dest, _src, length) => {
                 let needed = copy_memory_size_dest(*dest, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 Resource::builder()
                     .stack_reserved(3)
                     .gas(12 + copy_word_gas(*length) + expansion)
@@ -514,8 +537,8 @@ impl Opcode {
             // EXTCODECOPY (2600 cold + 3·words(length) + expansion to dest+length). Peak rise = 4.
             Opcode::ExtCodeCopy(_addr, dest, _src, length) => {
                 let needed = copy_memory_size_dest(*dest, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 Resource::builder()
                     .stack_reserved(4)
                     .gas(12 + 2600 + copy_word_gas(*length) + expansion)
@@ -531,16 +554,19 @@ impl Opcode {
             // Peak rise = 2.
             Opcode::Return(offset, length) | Opcode::Revert(offset, length) => {
                 let needed = memory_range_size(*offset, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
-                Resource::builder().stack_reserved(2).gas(6 + expansion).build()
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder()
+                    .stack_reserved(2)
+                    .gas(6 + expansion)
+                    .build()
             }
             // PUSH8 length (3) + PUSH8 offset (3) + KECCAK256
             // (30 base + 6·words(length) + memory expansion). Peak rise = 2.
             Opcode::Keccak256(offset, length) => {
                 let needed = memory_range_size(*offset, *length);
-                let expansion = memory_word_cost(needed)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let expansion =
+                    memory_word_cost(needed).saturating_sub(memory_word_cost(machine.memory()));
                 let words = length.saturating_add(31) / 32;
                 Resource::builder()
                     .stack_reserved(2)
@@ -572,8 +598,8 @@ impl Opcode {
                 let init_code_len = init_code.len() as u64;
                 let words = init_code_len.saturating_add(31) / 32;
                 let new_mem = words.saturating_mul(32);
-                let mem_expansion = memory_word_cost(new_mem)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let mem_expansion =
+                    memory_word_cost(new_mem).saturating_sub(memory_word_cost(machine.memory()));
                 let mstore_setup = 9u64.saturating_mul(words);
                 let push_args = 9u64; // PUSH8 size + 2 * PUSH1 0
                 let create_base = 32000u64;
@@ -599,8 +625,8 @@ impl Opcode {
                 let init_code_len = init_code.len() as u64;
                 let words = init_code_len.saturating_add(31) / 32;
                 let new_mem = words.saturating_mul(32);
-                let mem_expansion = memory_word_cost(new_mem)
-                    .saturating_sub(memory_word_cost(machine.memory()));
+                let mem_expansion =
+                    memory_word_cost(new_mem).saturating_sub(memory_word_cost(machine.memory()));
                 let mstore_setup = 9u64.saturating_mul(words);
                 let push_args = 12u64; // PUSH32 salt + PUSH8 size + 2 * PUSH1 0
                 let create2_base = 32000u64;
@@ -626,19 +652,15 @@ impl Opcode {
     pub fn is_terminating(&self) -> bool {
         matches!(
             self,
-            Opcode::Stop
-                | Opcode::Return(..)
-                | Opcode::Revert(..)
-                | Opcode::SelfDestruct(..)
+            Opcode::Stop | Opcode::Return(..) | Opcode::Revert(..) | Opcode::SelfDestruct(..)
         )
     }
 
     pub fn provides(&self, machine: &Machine) -> Resource {
         match self {
-            Opcode::Pop
-            | Opcode::SStore
-            | Opcode::TStore
-            | Opcode::Stop => Resource::builder().build(),
+            Opcode::Pop | Opcode::SStore | Opcode::TStore | Opcode::Stop => {
+                Resource::builder().build()
+            }
             // RETURN / REVERT produce no stack output but may grow memory to
             // cover offset..offset+length.
             Opcode::Return(offset, length) | Opcode::Revert(offset, length) => {
@@ -801,38 +823,166 @@ impl Opcode {
             53 => Opcode::TLoad,
             54 => Opcode::TStore,
             55 => Opcode::Push0,
-            56 => { let mut b = [0u8; 1]; rng.fill(&mut b); Opcode::Push1(b) }
-            57 => { let mut b = [0u8; 2]; rng.fill(&mut b); Opcode::Push2(b) }
-            58 => { let mut b = [0u8; 3]; rng.fill(&mut b); Opcode::Push3(b) }
-            59 => { let mut b = [0u8; 4]; rng.fill(&mut b); Opcode::Push4(b) }
-            60 => { let mut b = [0u8; 5]; rng.fill(&mut b); Opcode::Push5(b) }
-            61 => { let mut b = [0u8; 6]; rng.fill(&mut b); Opcode::Push6(b) }
-            62 => { let mut b = [0u8; 7]; rng.fill(&mut b); Opcode::Push7(b) }
-            63 => { let mut b = [0u8; 8]; rng.fill(&mut b); Opcode::Push8(b) }
-            64 => { let mut b = [0u8; 9]; rng.fill(&mut b); Opcode::Push9(b) }
-            65 => { let mut b = [0u8; 10]; rng.fill(&mut b); Opcode::Push10(b) }
-            66 => { let mut b = [0u8; 11]; rng.fill(&mut b); Opcode::Push11(b) }
-            67 => { let mut b = [0u8; 12]; rng.fill(&mut b); Opcode::Push12(b) }
-            68 => { let mut b = [0u8; 13]; rng.fill(&mut b); Opcode::Push13(b) }
-            69 => { let mut b = [0u8; 14]; rng.fill(&mut b); Opcode::Push14(b) }
-            70 => { let mut b = [0u8; 15]; rng.fill(&mut b); Opcode::Push15(b) }
-            71 => { let mut b = [0u8; 16]; rng.fill(&mut b); Opcode::Push16(b) }
-            72 => { let mut b = [0u8; 17]; rng.fill(&mut b); Opcode::Push17(b) }
-            73 => { let mut b = [0u8; 18]; rng.fill(&mut b); Opcode::Push18(b) }
-            74 => { let mut b = [0u8; 19]; rng.fill(&mut b); Opcode::Push19(b) }
-            75 => { let mut b = [0u8; 20]; rng.fill(&mut b); Opcode::Push20(b) }
-            76 => { let mut b = [0u8; 21]; rng.fill(&mut b); Opcode::Push21(b) }
-            77 => { let mut b = [0u8; 22]; rng.fill(&mut b); Opcode::Push22(b) }
-            78 => { let mut b = [0u8; 23]; rng.fill(&mut b); Opcode::Push23(b) }
-            79 => { let mut b = [0u8; 24]; rng.fill(&mut b); Opcode::Push24(b) }
-            80 => { let mut b = [0u8; 25]; rng.fill(&mut b); Opcode::Push25(b) }
-            81 => { let mut b = [0u8; 26]; rng.fill(&mut b); Opcode::Push26(b) }
-            82 => { let mut b = [0u8; 27]; rng.fill(&mut b); Opcode::Push27(b) }
-            83 => { let mut b = [0u8; 28]; rng.fill(&mut b); Opcode::Push28(b) }
-            84 => { let mut b = [0u8; 29]; rng.fill(&mut b); Opcode::Push29(b) }
-            85 => { let mut b = [0u8; 30]; rng.fill(&mut b); Opcode::Push30(b) }
-            86 => { let mut b = [0u8; 31]; rng.fill(&mut b); Opcode::Push31(b) }
-            87 => { let mut b = [0u8; 32]; rng.fill(&mut b); Opcode::Push32(b) }
+            56 => {
+                let mut b = [0u8; 1];
+                rng.fill(&mut b);
+                Opcode::Push1(b)
+            }
+            57 => {
+                let mut b = [0u8; 2];
+                rng.fill(&mut b);
+                Opcode::Push2(b)
+            }
+            58 => {
+                let mut b = [0u8; 3];
+                rng.fill(&mut b);
+                Opcode::Push3(b)
+            }
+            59 => {
+                let mut b = [0u8; 4];
+                rng.fill(&mut b);
+                Opcode::Push4(b)
+            }
+            60 => {
+                let mut b = [0u8; 5];
+                rng.fill(&mut b);
+                Opcode::Push5(b)
+            }
+            61 => {
+                let mut b = [0u8; 6];
+                rng.fill(&mut b);
+                Opcode::Push6(b)
+            }
+            62 => {
+                let mut b = [0u8; 7];
+                rng.fill(&mut b);
+                Opcode::Push7(b)
+            }
+            63 => {
+                let mut b = [0u8; 8];
+                rng.fill(&mut b);
+                Opcode::Push8(b)
+            }
+            64 => {
+                let mut b = [0u8; 9];
+                rng.fill(&mut b);
+                Opcode::Push9(b)
+            }
+            65 => {
+                let mut b = [0u8; 10];
+                rng.fill(&mut b);
+                Opcode::Push10(b)
+            }
+            66 => {
+                let mut b = [0u8; 11];
+                rng.fill(&mut b);
+                Opcode::Push11(b)
+            }
+            67 => {
+                let mut b = [0u8; 12];
+                rng.fill(&mut b);
+                Opcode::Push12(b)
+            }
+            68 => {
+                let mut b = [0u8; 13];
+                rng.fill(&mut b);
+                Opcode::Push13(b)
+            }
+            69 => {
+                let mut b = [0u8; 14];
+                rng.fill(&mut b);
+                Opcode::Push14(b)
+            }
+            70 => {
+                let mut b = [0u8; 15];
+                rng.fill(&mut b);
+                Opcode::Push15(b)
+            }
+            71 => {
+                let mut b = [0u8; 16];
+                rng.fill(&mut b);
+                Opcode::Push16(b)
+            }
+            72 => {
+                let mut b = [0u8; 17];
+                rng.fill(&mut b);
+                Opcode::Push17(b)
+            }
+            73 => {
+                let mut b = [0u8; 18];
+                rng.fill(&mut b);
+                Opcode::Push18(b)
+            }
+            74 => {
+                let mut b = [0u8; 19];
+                rng.fill(&mut b);
+                Opcode::Push19(b)
+            }
+            75 => {
+                let mut b = [0u8; 20];
+                rng.fill(&mut b);
+                Opcode::Push20(b)
+            }
+            76 => {
+                let mut b = [0u8; 21];
+                rng.fill(&mut b);
+                Opcode::Push21(b)
+            }
+            77 => {
+                let mut b = [0u8; 22];
+                rng.fill(&mut b);
+                Opcode::Push22(b)
+            }
+            78 => {
+                let mut b = [0u8; 23];
+                rng.fill(&mut b);
+                Opcode::Push23(b)
+            }
+            79 => {
+                let mut b = [0u8; 24];
+                rng.fill(&mut b);
+                Opcode::Push24(b)
+            }
+            80 => {
+                let mut b = [0u8; 25];
+                rng.fill(&mut b);
+                Opcode::Push25(b)
+            }
+            81 => {
+                let mut b = [0u8; 26];
+                rng.fill(&mut b);
+                Opcode::Push26(b)
+            }
+            82 => {
+                let mut b = [0u8; 27];
+                rng.fill(&mut b);
+                Opcode::Push27(b)
+            }
+            83 => {
+                let mut b = [0u8; 28];
+                rng.fill(&mut b);
+                Opcode::Push28(b)
+            }
+            84 => {
+                let mut b = [0u8; 29];
+                rng.fill(&mut b);
+                Opcode::Push29(b)
+            }
+            85 => {
+                let mut b = [0u8; 30];
+                rng.fill(&mut b);
+                Opcode::Push30(b)
+            }
+            86 => {
+                let mut b = [0u8; 31];
+                rng.fill(&mut b);
+                Opcode::Push31(b)
+            }
+            87 => {
+                let mut b = [0u8; 32];
+                rng.fill(&mut b);
+                Opcode::Push32(b)
+            }
             88 => Opcode::Dup1,
             89 => Opcode::Dup2,
             90 => Opcode::Dup3,
