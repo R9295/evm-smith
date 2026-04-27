@@ -80,11 +80,28 @@ fn main() {
     print_opcode_summary(&totals);
 }
 
+/// Returns true for opcodes only active under EOF (not on any current mainnet
+/// spec — Cancun is the latest as of revm 14). Filtered out of the mainnet
+/// summary so the "never executed" list isn't dominated by EOF-only entries.
+fn is_eof_only(byte: u8) -> bool {
+    matches!(
+        byte,
+        0xD0..=0xD3   // DATALOAD, DATALOADN, DATASIZE, DATACOPY (EIP-7480)
+        | 0xE0..=0xE8 // RJUMP, RJUMPI, RJUMPV, CALLF, RETF, JUMPF, DUPN, SWAPN, EXCHANGE
+        | 0xEC        // EOFCREATE
+        | 0xEE        // RETURNCONTRACT
+        | 0xF7        // RETURNDATALOAD
+        | 0xF8        // EXTCALL
+        | 0xF9        // EXTDELEGATECALL
+        | 0xFB        // EXTSTATICCALL
+    )
+}
+
 fn print_opcode_summary(totals: &[u64; 256]) {
     let mut ran: Vec<(&'static str, u64)> = Vec::new();
     let mut not_ran: Vec<&'static str> = Vec::new();
     for byte in 0u8..=255 {
-        if OpCode::new(byte).is_none() {
+        if OpCode::new(byte).is_none() || is_eof_only(byte) {
             continue;
         }
         let name = OpCode::name_by_op(byte);
