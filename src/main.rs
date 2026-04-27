@@ -8,8 +8,8 @@ use crate::{
     opcodes::{Opcode},
     runner::RunSummary,
 };
-use revm::interpreter::OpCode;
-use revm::primitives::{ExecutionResult, HaltReason, OutOfGasError};
+use revm::bytecode::OpCode;
+use revm::context_interface::result::{ExecutionResult, HaltReason, OutOfGasError};
 use std::time::SystemTime;
 
 fn main() {
@@ -34,15 +34,9 @@ fn main() {
             totals[i] = totals[i].saturating_add(*count);
         }
         match run_summary.result {
-            ExecutionResult::Success {
-                reason,
-                gas_used,
-                gas_refunded,
-                logs,
-                output,
-            } => {}
-            ExecutionResult::Revert { gas_used, output } => {}
-            ExecutionResult::Halt { reason, gas_used } => {
+            ExecutionResult::Success { .. } => {}
+            ExecutionResult::Revert { .. } => {}
+            ExecutionResult::Halt { ref reason, .. } => {
                 eprintln!("{:?}", reason);
                 match reason {
                     HaltReason::OutOfGas(oog_cause) => match oog_cause {
@@ -51,6 +45,7 @@ fn main() {
                         OutOfGasError::Memory => report_error(&run_summary),
                         OutOfGasError::Precompile => report_error(&run_summary),
                         OutOfGasError::InvalidOperand => {}
+                        OutOfGasError::ReentrancySentry => {}
                     },
                     HaltReason::OpcodeNotFound => report_error(&run_summary),
                     HaltReason::InvalidFEOpcode => {}
@@ -61,14 +56,11 @@ fn main() {
                     HaltReason::OutOfOffset => report_error(&run_summary),
                     HaltReason::CreateCollision => report_error(&run_summary),
                     HaltReason::PrecompileError => {}
+                    HaltReason::PrecompileErrorWithContext(_) => {}
                     HaltReason::NonceOverflow => report_error(&run_summary),
                     HaltReason::CreateContractSizeLimit => report_error(&run_summary),
                     HaltReason::CreateContractStartingWithEF => report_error(&run_summary),
                     HaltReason::CreateInitCodeSizeLimit => report_error(&run_summary),
-                    HaltReason::EofAuxDataOverflow => {}
-                    HaltReason::EofAuxDataTooSmall => {}
-                    HaltReason::EOFFunctionStackOverflow => {}
-                    HaltReason::InvalidEXTCALLTarget => {}
                     HaltReason::OverflowPayment => {}
                     HaltReason::StateChangeDuringStaticCall => {}
                     HaltReason::CallNotAllowedInsideStatic => {}
