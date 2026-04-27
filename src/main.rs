@@ -43,6 +43,7 @@ fn main() {
             } => {}
             ExecutionResult::Revert { gas_used, output } => {}
             ExecutionResult::Halt { reason, gas_used } => {
+                eprintln!("{:?}", reason);
                 match reason {
                     HaltReason::OutOfGas(oog_cause) => match oog_cause {
                         OutOfGasError::Basic => report_error(&run_summary),

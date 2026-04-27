@@ -56,6 +56,18 @@ impl Machine {
         self.memory
     }
 
+    pub fn gas(&self) -> u64 {
+        self.gas
+    }
+
+    pub fn create_gas_percentage(&self) -> u8 {
+        self.config.create_gas_percentage
+    }
+
+    pub fn bytecode_ops(&self) -> &[Opcode] {
+        &self.bytecode
+    }
+
     pub fn ingest(&mut self, op: Opcode) -> anyhow::Result<(), Error> {
         if self.halted {
             return Err(Error::HaltConditionEncountered);
@@ -63,6 +75,12 @@ impl Machine {
         if !self.config.allow_termination && op.is_terminating() {
             return Ok(());
         }
+        // Materialize a placeholder Create (empty payload from `Opcode::generate`)
+        // now that we have access to the outer machine's gas budget and RNG.
+        let op = match op {
+            Opcode::Create(ref payload) if payload.is_empty() => self.build_create(),
+            other => other,
+        };
         let mut stack = vec![op];
         while let Some(op) = stack.pop() {
             let requires = op.requires(self);
@@ -82,8 +100,9 @@ impl Machine {
                 }
                 self.memory = self.memory.saturating_add(provides.memory());
                 debug_assert!(self.stack.len() <= 1024);
+                let terminating = op.is_terminating();
                 self.bytecode.push(op);
-                if op.is_terminating() {
+                if terminating {
                     self.halted = true;
                     return Err(Error::HaltConditionEncountered);
                 }
@@ -111,21 +130,86 @@ impl Machine {
         self.bytecode.iter().flat_map(|op| op.render()).collect()
     }
 
+    /// Generates the init code that a CREATE will MSTORE into outer memory.
+    /// Spawns a fresh sub-machine with `allow_termination = false` and a
+    /// fraction of the outer's *current* remaining gas (per the configured
+    /// percentage), runs the same generation loop as `main`, then truncates at
+    /// the last whole-opcode boundary that fits under the EIP-3860 init code
+    /// limit and appends a `RETURN(0, 0)` so the deploy frame returns empty
+    /// runtime code (always passes EIP-170 / EIP-3541).
+    ///
+    /// Nested CREATE is allowed: the inner generator can itself draw a
+    /// `Create`, which recursively materializes via `build_create` at the
+    /// next depth. Recursion is self-bounded — each level uses
+    /// `create_gas_percentage`% of the parent's symbolic gas, so the budget
+    /// shrinks geometrically until CREATE's `requires.gas` exceeds it and
+    /// the inner ingest stops with `OutOfGas`.
+    ///
+    /// Caveat: a deeply nested CREATE *may* silently fail at runtime even
+    /// though the symbolic accounting is conservative. Each level forwards
+    /// 63/64 of remaining gas (EIP-150) and we charge ⌈64·sub_budget/63⌉ to
+    /// cover the rounding, but if a sub-call OOGs at runtime the EVM consumes
+    /// all forwarded gas and pushes a zero address, then the parent frame
+    /// continues with only the 1/64 retained portion. That doesn't violate
+    /// any outer invariant (the harness still doesn't panic), but the inner
+    /// deploy simply produces no contract.
+    fn build_create(&mut self) -> Opcode {
+        // EIP-3860 caps init code at 49152 bytes; reserve 5 bytes for the
+        // appended RETURN(0, 0) tail (PUSH1 0, PUSH1 0, RETURN).
+        const MAX_INIT_CODE: usize = 49152 - 5;
+
+        let pct = self.config.create_gas_percentage as u64;
+        let sub_budget = self.gas.saturating_mul(pct) / 100;
+        // Fork two independent RNGs from the outer's so the sub-machine's
+        // internal constraint solver and the inner generator don't share state.
+        let gen_seed = self.rng.u64(..);
+        let machine_seed = self.rng.u64(..);
+        let mut sub_config = self.config.clone();
+        sub_config.allow_termination = false;
+        let mut sub_machine = Machine::new(sub_budget, Rng::with_seed(machine_seed), sub_config);
+        let mut gen_rng = Rng::with_seed(gen_seed);
+        loop {
+            let inner = Opcode::generate(&mut gen_rng);
+            if sub_machine.ingest(inner).is_err() {
+                break;
+            }
+        }
+
+        let mut init_code: Vec<u8> = Vec::new();
+        for op in sub_machine.bytecode_ops() {
+            let rendered = op.render();
+            if init_code.len() + rendered.len() > MAX_INIT_CODE {
+                break;
+            }
+            init_code.extend_from_slice(&rendered);
+        }
+        // PUSH1 0 (length), PUSH1 0 (offset), RETURN.
+        init_code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0xF3]);
+        Opcode::Create(init_code)
+    }
+
     pub fn constraints(&self, requires: &Resource, provides: &Resource) -> Option<Resource> {
-        let current_stack = self.stack.len();
+        let current_stack = self.stack.len() as isize;
         let gas_delta = if self.gas < requires.gas() {
             requires.gas() - self.gas
         } else {
             0
         };
-        let mut stack_delta = if (current_stack as isize) < requires.stack() {
-            requires.stack() - (current_stack as isize)
-        } else {
-            0
-        };
-        if self.stack.len() == 1024 && provides.stack() > 0 {
-            stack_delta = 0 - provides.stack();
-        }
+
+        // Underflow: ensure stack has at least requires.stack() items present.
+        // Positive delta tells the solver to synthesize PUSHes.
+        let underflow = (requires.stack() - current_stack).max(0);
+
+        // Overflow: peak runtime stack reaches `current + max(stack_reserved,
+        // provides.stack - requires.stack, 0)`. If that exceeds 1024 the
+        // solver emits POPs (negative delta) to make room — never PUSHes,
+        // since stack_reserved is about free slots, not items to consume.
+        let net_growth = (provides.stack() - requires.stack()).max(0);
+        let peak_above = (requires.stack_reserved() as isize).max(net_growth);
+        let overflow = (1024 - current_stack - peak_above).min(0);
+
+        let stack_delta = if underflow > 0 { underflow } else { overflow };
+
         if stack_delta == 0 && gas_delta == 0 {
             None
         } else {
