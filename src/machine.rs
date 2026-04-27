@@ -47,7 +47,11 @@ impl Machine {
     pub fn new(gas: u64, rng: Rng, config: Config) -> Self {
         let caller = Address::from([0x11; 20]);
         let current_address = Address::from([0x42; 20]);
-        Self::with_context(gas, rng, config, current_address, caller, 1)
+        let mut machine = Self::with_context(gas, rng, config, current_address, caller, 1);
+        // Match EVM transaction execution semantics: the tx sender's nonce is
+        // bumped before any bytecode runs.
+        machine.bump_nonce(caller);
+        machine
     }
 
     fn with_context(
@@ -107,6 +111,16 @@ impl Machine {
             .collect();
         created.sort_unstable_by(|left, right| left.as_slice().cmp(right.as_slice()));
         created
+    }
+
+    pub fn nonce_snapshot(&self) -> Vec<(Address, u64)> {
+        let mut snapshot: Vec<_> = self
+            .nonces
+            .iter()
+            .map(|(address, nonce)| (*address, *nonce))
+            .collect();
+        snapshot.sort_unstable_by(|left, right| left.0.as_slice().cmp(right.0.as_slice()));
+        snapshot
     }
 
     fn current_address(&self) -> Address {
@@ -359,7 +373,7 @@ mod tests {
         let machine = Machine::new(1, Rng::with_seed(7), Config::default());
 
         assert_eq!(machine.call_stack, vec![caller]);
-        assert_eq!(machine.nonces.get(&caller), Some(&0));
+        assert_eq!(machine.nonces.get(&caller), Some(&1));
     }
 
     #[test]
@@ -375,7 +389,7 @@ mod tests {
                 .is_ok()
         );
 
-        assert_eq!(machine.nonces.get(&caller), Some(&0));
+        assert_eq!(machine.nonces.get(&caller), Some(&1));
         assert_eq!(machine.nonces.get(&code_addr), Some(&2));
         assert_eq!(machine.nonces.get(&created), Some(&1));
     }
@@ -391,7 +405,7 @@ mod tests {
 
         assert!(machine.ingest(Opcode::Create2(init_code, salt)).is_ok());
 
-        assert_eq!(machine.nonces.get(&caller), Some(&0));
+        assert_eq!(machine.nonces.get(&caller), Some(&1));
         assert_eq!(machine.nonces.get(&code_addr), Some(&2));
         assert_eq!(machine.nonces.get(&created), Some(&1));
     }

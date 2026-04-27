@@ -1,11 +1,12 @@
 use revm::{
     Context, MainBuilder, MainContext,
     bytecode::{Bytecode, OpCode},
-    context::TxEnv,
+    context::{ContextTr, TxEnv},
     context_interface::result::ExecutionResult,
     database::CacheDB,
     database_interface::EmptyDB,
-    inspector::{InspectEvm, Inspector},
+    handler::EvmTr,
+    inspector::{InspectCommitEvm, Inspector},
     interpreter::{
         CreateInputs, CreateOutcome, Interpreter, InterpreterTypes, interpreter_types::Jumps,
     },
@@ -61,6 +62,7 @@ pub struct RunSummary {
     pub opcode_counts: [u64; 256],
     pub trace: Vec<String>,
     pub created_contracts: Vec<Address>,
+    pub nonces: Vec<(Address, u64)>,
 }
 
 pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
@@ -82,7 +84,7 @@ pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
     let mut evm = ctx.build_mainnet_with_inspector(inspector);
 
     let result = evm
-        .inspect_one_tx(
+        .inspect_tx_commit(
             TxEnv::builder()
                 .caller(caller)
                 .kind(TxKind::Call(code_addr))
@@ -94,14 +96,19 @@ pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
         )
         .expect("evm transact failed");
 
-    let inspector = evm.inspector;
     let mut created_contracts = if matches!(result, ExecutionResult::Success { .. }) {
-        inspector.created_contracts
+        evm.inspector.created_contracts.clone()
     } else {
         Vec::new()
     };
     created_contracts.sort_unstable_by(|left, right| left.as_slice().cmp(right.as_slice()));
-    let trace = inspector
+    let nonces = if matches!(result, ExecutionResult::Success { .. }) {
+        nonce_snapshot(evm.ctx_ref().db(), caller, code_addr, &created_contracts)
+    } else {
+        Vec::new()
+    };
+    let trace = evm
+        .inspector
         .trace
         .iter()
         .map(|op| OpCode::name_by_op(*op).to_string())
@@ -109,10 +116,36 @@ pub fn run(bytecode: &[u8], gas_budget: u64) -> RunSummary {
 
     RunSummary {
         result,
-        opcode_counts: inspector.opcode_counts,
+        opcode_counts: evm.inspector.opcode_counts,
         trace,
         created_contracts,
+        nonces,
     }
+}
+
+fn nonce_snapshot(
+    db: &CacheDB<EmptyDB>,
+    caller: Address,
+    code_addr: Address,
+    created_contracts: &[Address],
+) -> Vec<(Address, u64)> {
+    let mut addresses = vec![caller, code_addr];
+    addresses.extend_from_slice(created_contracts);
+
+    let mut snapshot: Vec<_> = addresses
+        .into_iter()
+        .map(|address| (address, account_nonce(db, address)))
+        .collect();
+    snapshot.sort_unstable_by(|left, right| left.0.as_slice().cmp(right.0.as_slice()));
+    snapshot
+}
+
+fn account_nonce(db: &CacheDB<EmptyDB>, address: Address) -> u64 {
+    db.cache
+        .accounts
+        .get(&address)
+        .and_then(|account| account.info().map(|info| info.nonce))
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -136,5 +169,6 @@ mod tests {
 
         let summary = run(&machine.bytecode(), 100_000);
         assert_eq!(summary.created_contracts, machine.created_contracts());
+        assert_eq!(summary.nonces, machine.nonce_snapshot());
     }
 }

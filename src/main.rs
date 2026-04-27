@@ -79,7 +79,12 @@ fn main() {
 fn assert_machine_state_valid(machine: &Machine, run_summary: &RunSummary) {
     let machine_created = machine.created_contracts();
     if machine_created != run_summary.created_contracts {
-        report_state_error(run_summary, &machine_created);
+        report_state_error(run_summary, &machine_created, &machine.nonce_snapshot());
+    }
+
+    let machine_nonces = machine.nonce_snapshot();
+    if machine_nonces != run_summary.nonces {
+        report_state_error(run_summary, &machine_created, &machine_nonces);
     }
 }
 
@@ -134,11 +139,17 @@ fn report_error(run_summary: &RunSummary) {
     panic!("FATAL ERROR: generator invariant violated");
 }
 
-fn report_state_error(run_summary: &RunSummary, machine_created: &[revm::primitives::Address]) {
+fn report_state_error(
+    run_summary: &RunSummary,
+    machine_created: &[revm::primitives::Address],
+    machine_nonces: &[(revm::primitives::Address, u64)],
+) {
     eprintln!("machine created contracts: {:?}", machine_created);
     eprintln!(
         "runtime created contracts: {:?}",
         run_summary.created_contracts
     );
+    eprintln!("machine nonces: {:?}", machine_nonces);
+    eprintln!("runtime nonces: {:?}", run_summary.nonces);
     report_error(run_summary);
 }
