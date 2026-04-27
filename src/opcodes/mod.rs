@@ -208,6 +208,13 @@ pub enum Opcode {
     // outer's remaining gas. Rendered as <MSTORE chain> ‖ PUSH8 size ‖
     // PUSH1 0 (offset) ‖ PUSH1 0 (value) ‖ CREATE.
     Create(Vec<u8>),
+    // CREATE2 (0xF5). Same scheme as CREATE plus a U256 salt — the deployed
+    // address depends on (caller, salt, keccak256(init_code)) per EIP-1014.
+    // The salt is sampled at variant-generation time; the init code is
+    // materialized lazily in `Machine::ingest` from a sub-machine. Rendered as
+    // <MSTORE chain> ‖ PUSH32 salt ‖ PUSH8 size ‖ PUSH1 0 (offset) ‖
+    // PUSH1 0 (value) ‖ CREATE2.
+    Create2(Vec<u8>, U256),
 }
 
 /// Memory size required to access `offset..offset+length`. EVM does no memory
@@ -583,6 +590,34 @@ impl Opcode {
                     .saturating_add(sub_charge);
                 Resource::builder().stack_reserved(3).gas(total).build()
             }
+            // CREATE2: same as CREATE plus 6 gas/word for the keccak over the
+            // init code (EIP-1014 address derivation), plus one extra PUSH32
+            // (3 gas) for the salt argument. Stack model: stack_reserved(4)
+            // because the render pushes salt + size + offset + value before
+            // CREATE2 pops them.
+            Opcode::Create2(init_code, _salt) => {
+                let init_code_len = init_code.len() as u64;
+                let words = init_code_len.saturating_add(31) / 32;
+                let new_mem = words.saturating_mul(32);
+                let mem_expansion = memory_word_cost(new_mem)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let mstore_setup = 9u64.saturating_mul(words);
+                let push_args = 12u64; // PUSH32 salt + PUSH8 size + 2 * PUSH1 0
+                let create2_base = 32000u64;
+                let eip3860 = 2u64.saturating_mul(words);
+                let keccak_cost = 6u64.saturating_mul(words);
+                let pct = machine.create_gas_percentage() as u64;
+                let sub_budget = machine.gas().saturating_mul(pct) / 100;
+                let sub_charge = sub_budget.saturating_mul(64).saturating_add(62) / 63;
+                let total = create2_base
+                    .saturating_add(eip3860)
+                    .saturating_add(keccak_cost)
+                    .saturating_add(mstore_setup)
+                    .saturating_add(mem_expansion)
+                    .saturating_add(push_args)
+                    .saturating_add(sub_charge);
+                Resource::builder().stack_reserved(4).gas(total).build()
+            }
         }
     }
 
@@ -666,7 +701,7 @@ impl Opcode {
             }
             // CREATE writes the init code to memory[0..init_code_len_padded]
             // and pushes the deployed address (or zero on sub-call failure).
-            Opcode::Create(init_code) => {
+            Opcode::Create(init_code) | Opcode::Create2(init_code, _) => {
                 let words = (init_code.len() as u64).saturating_add(31) / 32;
                 let new_mem = words.saturating_mul(32);
                 let increment = new_mem.saturating_sub(machine.memory());
@@ -696,7 +731,7 @@ impl Opcode {
     /// Returns a uniformly-random `Opcode` variant. For `Push*` variants the
     /// immediate-byte array is filled with random bytes from `rng`.
     pub fn generate(rng: &mut Rng) -> Opcode {
-        const VARIANT_COUNT: usize = 139;
+        const VARIANT_COUNT: usize = 140;
         Self::nth_variant(rng.usize(0..VARIANT_COUNT), rng)
     }
 
@@ -913,6 +948,9 @@ impl Opcode {
             // ingested; subsequent ingestions of the same value would re-use
             // the populated payload.
             138 => Opcode::Create(Vec::new()),
+            // CREATE2 placeholder; salt is sampled now (it does not depend on
+            // outer machine state), init code is materialized lazily.
+            139 => Opcode::Create2(Vec::new(), random_topic(rng)),
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         }
     }
@@ -1108,20 +1146,15 @@ impl Opcode {
                 out
             }
             Opcode::Create(init_code) => render_create(init_code),
+            Opcode::Create2(init_code, salt) => render_create2(init_code, *salt),
         }
     }
 }
 
-/// Renders a CREATE region: lays the init code into outer memory at offset 0
-/// via PUSH32/PUSH8/MSTORE per 32-byte chunk (last chunk zero-padded), pushes
-/// `(value=0, offset=0, size=init_code_len)` bottom-up so `value` is on top of
-/// the stack as CREATE expects, then emits the CREATE opcode (0xF0). The op's
-/// `stack_reserved(3)` ensures the constraint solver has popped enough items
-/// that the 3 trailing pushes can't overflow.
-fn render_create(init_code: &[u8]) -> Vec<u8> {
-    let init_code_len = init_code.len() as u64;
+/// Lays `init_code` into outer memory at offset 0 via PUSH32/PUSH8/MSTORE per
+/// 32-byte chunk (last chunk zero-padded). Used by both CREATE and CREATE2.
+fn render_init_code_setup(out: &mut Vec<u8>, init_code: &[u8]) {
     let words = init_code.len().div_ceil(32);
-    let mut out = Vec::with_capacity(words * 43 + 9 + 4 + 1);
     for chunk_idx in 0..words {
         let start = chunk_idx * 32;
         let end = (start + 32).min(init_code.len());
@@ -1133,6 +1166,18 @@ fn render_create(init_code: &[u8]) -> Vec<u8> {
         out.extend_from_slice(&(start as u64).to_be_bytes());
         out.push(0x52); // MSTORE
     }
+}
+
+/// Renders a CREATE region: lays the init code into outer memory, pushes
+/// `(value=0, offset=0, size=init_code_len)` bottom-up so `value` is on top of
+/// the stack as CREATE expects, then emits the CREATE opcode (0xF0). The op's
+/// `stack_reserved(3)` ensures the constraint solver has popped enough items
+/// that the 3 trailing pushes can't overflow.
+fn render_create(init_code: &[u8]) -> Vec<u8> {
+    let init_code_len = init_code.len() as u64;
+    let words = init_code.len().div_ceil(32);
+    let mut out = Vec::with_capacity(words * 43 + 9 + 4 + 1);
+    render_init_code_setup(&mut out, init_code);
     // Bottom-up so CREATE pops in order: value (top), offset, size (bottom).
     out.push(0x67); // PUSH8 size
     out.extend_from_slice(&init_code_len.to_be_bytes());
@@ -1141,6 +1186,27 @@ fn render_create(init_code: &[u8]) -> Vec<u8> {
     out.push(0x60); // PUSH1 0 (value)
     out.push(0x00);
     out.push(0xF0); // CREATE
+    out
+}
+
+/// Renders a CREATE2 region: same setup as CREATE, plus a PUSH32 salt at the
+/// bottom so CREATE2 pops `(value, offset, size, salt)` in order. The op's
+/// `stack_reserved(4)` covers the 4 trailing pushes.
+fn render_create2(init_code: &[u8], salt: U256) -> Vec<u8> {
+    let init_code_len = init_code.len() as u64;
+    let words = init_code.len().div_ceil(32);
+    let mut out = Vec::with_capacity(words * 43 + 33 + 9 + 4 + 1);
+    render_init_code_setup(&mut out, init_code);
+    // Bottom-up so CREATE2 pops in order: value (top), offset, size, salt (bottom).
+    out.push(0x7F); // PUSH32 salt
+    out.extend_from_slice(&salt.to_be_bytes::<32>());
+    out.push(0x67); // PUSH8 size
+    out.extend_from_slice(&init_code_len.to_be_bytes());
+    out.push(0x60); // PUSH1 0 (mem offset)
+    out.push(0x00);
+    out.push(0x60); // PUSH1 0 (value)
+    out.push(0x00);
+    out.push(0xF5); // CREATE2
     out
 }
 

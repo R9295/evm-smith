@@ -7,4 +7,4 @@ edition = "2024"
 alloy-primitives = "1.5.7"
 anyhow = "1.0.102"
 fastrand = "2.4.1"
-revm = "14"
+revm = {path = "./revm/crates/revm" }

@@ -75,10 +75,16 @@ impl Machine {
         if !self.config.allow_termination && op.is_terminating() {
             return Ok(());
         }
-        // Materialize a placeholder Create (empty payload from `Opcode::generate`)
-        // now that we have access to the outer machine's gas budget and RNG.
+        // Materialize placeholder CREATE/CREATE2 ops (empty payloads from
+        // `Opcode::generate`) now that we have access to the outer machine's
+        // gas budget and RNG.
         let op = match op {
-            Opcode::Create(ref payload) if payload.is_empty() => self.build_create(),
+            Opcode::Create(ref payload) if payload.is_empty() => {
+                Opcode::Create(self.build_init_code())
+            }
+            Opcode::Create2(ref payload, salt) if payload.is_empty() => {
+                Opcode::Create2(self.build_init_code(), salt)
+            }
             other => other,
         };
         let mut stack = vec![op];
@@ -130,22 +136,22 @@ impl Machine {
         self.bytecode.iter().flat_map(|op| op.render()).collect()
     }
 
-    /// Generates the init code that a CREATE will MSTORE into outer memory.
-    /// Spawns a fresh sub-machine with `allow_termination = false` and a
-    /// fraction of the outer's *current* remaining gas (per the configured
-    /// percentage), runs the same generation loop as `main`, then truncates at
-    /// the last whole-opcode boundary that fits under the EIP-3860 init code
-    /// limit and appends a `RETURN(0, 0)` so the deploy frame returns empty
-    /// runtime code (always passes EIP-170 / EIP-3541).
+    /// Generates the init code shared by CREATE and CREATE2: spawns a fresh
+    /// sub-machine with `allow_termination = false` and a fraction of the
+    /// outer's *current* remaining gas (per the configured percentage), runs
+    /// the same generation loop as `main`, then truncates at the last
+    /// whole-opcode boundary that fits under the EIP-3860 init code limit and
+    /// appends a `RETURN(0, 0)` so the deploy frame returns empty runtime
+    /// code (always passes EIP-170 / EIP-3541).
     ///
-    /// Nested CREATE is allowed: the inner generator can itself draw a
-    /// `Create`, which recursively materializes via `build_create` at the
-    /// next depth. Recursion is self-bounded — each level uses
-    /// `create_gas_percentage`% of the parent's symbolic gas, so the budget
-    /// shrinks geometrically until CREATE's `requires.gas` exceeds it and
-    /// the inner ingest stops with `OutOfGas`.
+    /// Nested CREATE/CREATE2 is allowed: the inner generator can itself draw
+    /// one, which recursively materializes at the next depth. Recursion is
+    /// self-bounded — each level uses `create_gas_percentage`% of the
+    /// parent's symbolic gas, so the budget shrinks geometrically until the
+    /// op's `requires.gas` exceeds it and the inner ingest stops with
+    /// `OutOfGas`.
     ///
-    /// Caveat: a deeply nested CREATE *may* silently fail at runtime even
+    /// Caveat: a deeply nested deploy *may* silently fail at runtime even
     /// though the symbolic accounting is conservative. Each level forwards
     /// 63/64 of remaining gas (EIP-150) and we charge ⌈64·sub_budget/63⌉ to
     /// cover the rounding, but if a sub-call OOGs at runtime the EVM consumes
@@ -153,7 +159,7 @@ impl Machine {
     /// continues with only the 1/64 retained portion. That doesn't violate
     /// any outer invariant (the harness still doesn't panic), but the inner
     /// deploy simply produces no contract.
-    fn build_create(&mut self) -> Opcode {
+    fn build_init_code(&mut self) -> Vec<u8> {
         // EIP-3860 caps init code at 49152 bytes; reserve 5 bytes for the
         // appended RETURN(0, 0) tail (PUSH1 0, PUSH1 0, RETURN).
         const MAX_INIT_CODE: usize = 49152 - 5;
@@ -185,7 +191,7 @@ impl Machine {
         }
         // PUSH1 0 (length), PUSH1 0 (offset), RETURN.
         init_code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0xF3]);
-        Opcode::Create(init_code)
+        init_code
     }
 
     pub fn constraints(&self, requires: &Resource, provides: &Resource) -> Option<Resource> {
