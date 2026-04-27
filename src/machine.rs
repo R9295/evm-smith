@@ -13,6 +13,7 @@ pub struct Machine {
     stack: Vec<U256>,
     memory: u64,
     bytecode: Vec<Opcode>,
+    halted: bool,
 }
 
 impl Machine {
@@ -23,6 +24,7 @@ impl Machine {
             memory: 0,
             stack: vec![],
             bytecode: vec![],
+            halted: false,
         }
     }
 
@@ -31,6 +33,9 @@ impl Machine {
     }
 
     pub fn ingest(&mut self, op: Opcode) -> anyhow::Result<(), Error> {
+        if self.halted {
+            return Err(Error::HaltConditionEncountered);
+        }
         let mut stack = vec![op];
         while let Some(op) = stack.pop() {
             let requires = op.requires(self);
@@ -51,6 +56,17 @@ impl Machine {
                 self.memory = self.memory.saturating_add(provides.memory());
                 debug_assert!(self.stack.len() <= 1024);
                 self.bytecode.push(op);
+                if matches!(
+                    op,
+                    Opcode::Stop
+                        | Opcode::Invalid
+                        | Opcode::Return(..)
+                        | Opcode::Revert(..)
+                        | Opcode::SelfDestruct(..)
+                ) {
+                    self.halted = true;
+                    return Err(Error::HaltConditionEncountered);
+                }
                 continue;
             }
             // SAFE: just validated earlier

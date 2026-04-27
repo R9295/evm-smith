@@ -171,11 +171,41 @@ pub enum Opcode {
     Log2(u64, u64, U256, U256),
     Log3(u64, u64, U256, U256, U256),
     Log4(u64, u64, U256, U256, U256, U256),
+
+    // 1-byte memory store: (offset, byte). PUSH1 byte ‖ PUSH8 offset ‖ MSTORE8.
+    MStore8(u64, u8),
+    // Memory→memory copy: (destOffset, srcOffset, length).
+    MCopy(u64, u64, u64),
+    // External-data → memory copies: (destOffset, srcOffset, length).
+    CallDataCopy(u64, u64, u64),
+    CodeCopy(u64, u64, u64),
+    // (address, destOffset, srcOffset, length).
+    ExtCodeCopy(U256, u64, u64, u64),
+
+    // Halts the execution frame.
+    Stop,
+    // Designated invalid opcode (consumes all remaining gas, halts).
+    Invalid,
+    // Reads 32 bytes from calldata at the given offset. Carried offset is
+    // pushed on the stack via PUSH8 and CALLDATALOAD pops it / pushes the word.
+    CallDataLoad(u64),
+
+    // Frame-terminating ops with memory range (offset, length). Rendered as
+    // PUSH8 length ‖ PUSH8 offset ‖ RETURN/REVERT.
+    Return(u64, u64),
+    Revert(u64, u64),
+
+    // Hash of memory[offset..offset+length]. Rendered as
+    // PUSH8 length ‖ PUSH8 offset ‖ KECCAK256.
+    Keccak256(u64, u64),
+    // Frame-terminating; sends the contract's balance to the beneficiary
+    // address (low 160 bits of the U256). Rendered as PUSH32 ‖ SELFDESTRUCT.
+    SelfDestruct(U256),
 }
 
 /// Memory size required to access `offset..offset+length`. EVM does no memory
 /// access (and no expansion) when length is zero.
-fn log_memory_size(offset: u64, length: u64) -> u64 {
+fn memory_range_size(offset: u64, length: u64) -> u64 {
     if length == 0 {
         0
     } else {
@@ -183,10 +213,10 @@ fn log_memory_size(offset: u64, length: u64) -> u64 {
     }
 }
 
-/// LOG offset capped at u16 (memory expansion gas), length capped at u8
-/// (per-byte LOG_DATA gas).
-/// NOTE: memory offset capped at u16
-fn random_log_range(rng: &mut Rng) -> (u64, u64) {
+/// Random `(offset, length)` for ops that touch a memory range. Offset capped
+/// at `u16::MAX` to bound memory expansion gas; length capped at `u8::MAX` to
+/// bound per-byte charges (e.g. LOG_DATA).
+fn random_memory_range(rng: &mut Rng) -> (u64, u64) {
     (rng.u16(..) as u64, rng.u8(..) as u64)
 }
 
@@ -194,6 +224,36 @@ fn random_topic(rng: &mut Rng) -> U256 {
     let mut bytes = [0u8; 32];
     rng.fill(&mut bytes);
     U256::from_be_bytes(bytes)
+}
+
+/// Per-word charge for *COPY / KECCAK256 style ops: 3 * ceil(length / 32).
+fn copy_word_gas(length: u64) -> u64 {
+    3u64.saturating_mul(length.saturating_add(31) / 32)
+}
+
+/// Memory size required by an op that writes `length` bytes at `dest`.
+fn copy_memory_size_dest(dest: u64, length: u64) -> u64 {
+    if length == 0 {
+        0
+    } else {
+        round_up_to_word(dest.saturating_add(length))
+    }
+}
+
+/// Memory size required by MCOPY (touches both source and destination regions).
+fn copy_memory_size_two(dest: u64, src: u64, length: u64) -> u64 {
+    if length == 0 {
+        0
+    } else {
+        let a = round_up_to_word(dest.saturating_add(length));
+        let b = round_up_to_word(src.saturating_add(length));
+        a.max(b)
+    }
+}
+
+/// (destOffset capped at u16, srcOffset capped at u16, length capped at u8).
+fn random_copy_range(rng: &mut Rng) -> (u64, u64, u64) {
+    (rng.u16(..) as u64, rng.u16(..) as u64, rng.u8(..) as u64)
 }
 
 impl Opcode {
@@ -369,7 +429,7 @@ impl Opcode {
             }
             // LOG_N: (N+2) embedded pushes (3 gas each) + 375*(N+1) base + 8*length + expansion.
             Opcode::Log0(offset, length) => {
-                let needed = log_memory_size(*offset, *length);
+                let needed = memory_range_size(*offset, *length);
                 let expansion = memory_word_cost(needed)
                     .saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (0 + 2);
@@ -377,7 +437,7 @@ impl Opcode {
                 Resource::builder().stack(2).gas(push_gas + log_gas + expansion).build()
             }
             Opcode::Log1(offset, length, _) => {
-                let needed = log_memory_size(*offset, *length);
+                let needed = memory_range_size(*offset, *length);
                 let expansion = memory_word_cost(needed)
                     .saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (1 + 2);
@@ -385,7 +445,7 @@ impl Opcode {
                 Resource::builder().stack(3).gas(push_gas + log_gas + expansion).build()
             }
             Opcode::Log2(offset, length, _, _) => {
-                let needed = log_memory_size(*offset, *length);
+                let needed = memory_range_size(*offset, *length);
                 let expansion = memory_word_cost(needed)
                     .saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (2 + 2);
@@ -393,7 +453,7 @@ impl Opcode {
                 Resource::builder().stack(4).gas(push_gas + log_gas + expansion).build()
             }
             Opcode::Log3(offset, length, _, _, _) => {
-                let needed = log_memory_size(*offset, *length);
+                let needed = memory_range_size(*offset, *length);
                 let expansion = memory_word_cost(needed)
                     .saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (3 + 2);
@@ -401,19 +461,107 @@ impl Opcode {
                 Resource::builder().stack(5).gas(push_gas + log_gas + expansion).build()
             }
             Opcode::Log4(offset, length, _, _, _, _) => {
-                let needed = log_memory_size(*offset, *length);
+                let needed = memory_range_size(*offset, *length);
                 let expansion = memory_word_cost(needed)
                     .saturating_sub(memory_word_cost(machine.memory()));
                 let push_gas = 3 * (4 + 2);
                 let log_gas = 375 * (4 + 1) + 8u64.saturating_mul(*length);
                 Resource::builder().stack(6).gas(push_gas + log_gas + expansion).build()
             }
+            // PUSH1 byte (3) + PUSH8 offset (3) + MSTORE8 (3 + memory expansion).
+            Opcode::MStore8(offset, _byte) => {
+                let new_size = round_up_to_word(offset.saturating_add(1));
+                let expansion = memory_word_cost(new_size)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder().stack(2).gas(9 + expansion).build()
+            }
+            // 3 PUSH8 (9) + MCOPY (3 + 3·words(length) + expansion over both regions).
+            Opcode::MCopy(dest, src, length) => {
+                let needed = copy_memory_size_two(*dest, *src, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder()
+                    .stack(3)
+                    .gas(12 + copy_word_gas(*length) + expansion)
+                    .build()
+            }
+            // 3 PUSH8 (9) + COPY_OP (3 + 3·words(length) + expansion to dest+length).
+            Opcode::CallDataCopy(dest, _src, length)
+            | Opcode::CodeCopy(dest, _src, length) => {
+                let needed = copy_memory_size_dest(*dest, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder()
+                    .stack(3)
+                    .gas(12 + copy_word_gas(*length) + expansion)
+                    .build()
+            }
+            // PUSH8 length + PUSH8 src + PUSH8 dest + PUSH32 address (12) +
+            // EXTCODECOPY (2600 cold + 3·words(length) + expansion to dest+length).
+            Opcode::ExtCodeCopy(_addr, dest, _src, length) => {
+                let needed = copy_memory_size_dest(*dest, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder()
+                    .stack(4)
+                    .gas(12 + 2600 + copy_word_gas(*length) + expansion)
+                    .build()
+            }
+            // STOP and INVALID terminate execution. After committing one,
+            // `Machine::ingest` returns Err(HaltConditionEncountered) to stop
+            // emitting unreachable bytecode.
+            Opcode::Stop | Opcode::Invalid => Resource::builder().build(),
+            // PUSH8 offset (3) + CALLDATALOAD (3); no memory expansion.
+            Opcode::CallDataLoad(_offset) => Resource::builder().stack(1).gas(6).build(),
+            // PUSH8 length (3) + PUSH8 offset (3) + RETURN/REVERT (0 + memory expansion).
+            Opcode::Return(offset, length) | Opcode::Revert(offset, length) => {
+                let needed = memory_range_size(*offset, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                Resource::builder().stack(2).gas(6 + expansion).build()
+            }
+            // PUSH8 length (3) + PUSH8 offset (3) + KECCAK256
+            // (30 base + 6·words(length) + memory expansion).
+            Opcode::Keccak256(offset, length) => {
+                let needed = memory_range_size(*offset, *length);
+                let expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let words = length.saturating_add(31) / 32;
+                Resource::builder()
+                    .stack(2)
+                    .gas(6 + 30 + 6u64.saturating_mul(words) + expansion)
+                    .build()
+            }
+            // PUSH32 beneficiary (3) + SELFDESTRUCT (5000 + 2600 cold +
+            // 25000 new-account; 32603 total worst case).
+            Opcode::SelfDestruct(_beneficiary) => {
+                Resource::builder().stack(1).gas(3 + 32600).build()
+            }
         }
     }
 
     pub fn provides(&self, machine: &Machine) -> Resource {
         match self {
-            Opcode::Pop | Opcode::SStore | Opcode::TStore => Resource::builder().build(),
+            Opcode::Pop
+            | Opcode::SStore
+            | Opcode::TStore
+            | Opcode::Stop
+            | Opcode::Invalid => Resource::builder().build(),
+            // RETURN / REVERT produce no stack output but may grow memory to
+            // cover offset..offset+length.
+            Opcode::Return(offset, length) | Opcode::Revert(offset, length) => {
+                let needed = memory_range_size(*offset, *length);
+                let increment = needed.saturating_sub(machine.memory());
+                Resource::builder().memory(increment).build()
+            }
+            // KECCAK256 pushes the hash and may grow memory.
+            Opcode::Keccak256(offset, length) => {
+                let needed = memory_range_size(*offset, *length);
+                let increment = needed.saturating_sub(machine.memory());
+                Resource::builder().stack(1).memory(increment).build()
+            }
+            // SELFDESTRUCT produces nothing on the stack and halts the frame.
+            Opcode::SelfDestruct(_beneficiary) => Resource::builder().build(),
             // MStore is stack-neutral; it grows memory to cover offset..offset+32.
             Opcode::MStore(offset, _value) => {
                 let new_size = round_up_to_word(offset.saturating_add(32));
@@ -432,7 +580,30 @@ impl Opcode {
             | Opcode::Log2(offset, length, ..)
             | Opcode::Log3(offset, length, ..)
             | Opcode::Log4(offset, length, ..) => {
-                let needed = log_memory_size(*offset, *length);
+                let needed = memory_range_size(*offset, *length);
+                let increment = needed.saturating_sub(machine.memory());
+                Resource::builder().memory(increment).build()
+            }
+            // MSTORE8 grows memory to cover offset..offset+1.
+            Opcode::MStore8(offset, _byte) => {
+                let new_size = round_up_to_word(offset.saturating_add(1));
+                let increment = new_size.saturating_sub(machine.memory());
+                Resource::builder().memory(increment).build()
+            }
+            // MCOPY touches both regions; expansion = max of the two.
+            Opcode::MCopy(dest, src, length) => {
+                let needed = copy_memory_size_two(*dest, *src, *length);
+                let increment = needed.saturating_sub(machine.memory());
+                Resource::builder().memory(increment).build()
+            }
+            // *COPY (writes only) — only the dest region matters.
+            Opcode::CallDataCopy(dest, _src, length) | Opcode::CodeCopy(dest, _src, length) => {
+                let needed = copy_memory_size_dest(*dest, *length);
+                let increment = needed.saturating_sub(machine.memory());
+                Resource::builder().memory(increment).build()
+            }
+            Opcode::ExtCodeCopy(_addr, dest, _src, length) => {
+                let needed = copy_memory_size_dest(*dest, *length);
                 let increment = needed.saturating_sub(machine.memory());
                 Resource::builder().memory(increment).build()
             }
@@ -460,7 +631,7 @@ impl Opcode {
     /// Returns a uniformly-random `Opcode` variant. For `Push*` variants the
     /// immediate-byte array is filled with random bytes from `rng`.
     pub fn generate(rng: &mut Rng) -> Opcode {
-        const VARIANT_COUNT: usize = 127;
+        const VARIANT_COUNT: usize = 139;
         Self::nth_variant(rng.usize(0..VARIANT_COUNT), rng)
     }
 
@@ -608,19 +779,19 @@ impl Opcode {
                 Opcode::MLoad(offset)
             }
             122 => {
-                let (offset, length) = random_log_range(rng);
+                let (offset, length) = random_memory_range(rng);
                 Opcode::Log0(offset, length)
             }
             123 => {
-                let (offset, length) = random_log_range(rng);
+                let (offset, length) = random_memory_range(rng);
                 Opcode::Log1(offset, length, random_topic(rng))
             }
             124 => {
-                let (offset, length) = random_log_range(rng);
+                let (offset, length) = random_memory_range(rng);
                 Opcode::Log2(offset, length, random_topic(rng), random_topic(rng))
             }
             125 => {
-                let (offset, length) = random_log_range(rng);
+                let (offset, length) = random_memory_range(rng);
                 Opcode::Log3(
                     offset,
                     length,
@@ -630,7 +801,7 @@ impl Opcode {
                 )
             }
             126 => {
-                let (offset, length) = random_log_range(rng);
+                let (offset, length) = random_memory_range(rng);
                 Opcode::Log4(
                     offset,
                     length,
@@ -640,6 +811,39 @@ impl Opcode {
                     random_topic(rng),
                 )
             }
+            127 => Opcode::MStore8(rng.u16(..) as u64, rng.u8(..)),
+            128 => {
+                let (dest, src, length) = random_copy_range(rng);
+                Opcode::MCopy(dest, src, length)
+            }
+            129 => {
+                let (dest, src, length) = random_copy_range(rng);
+                Opcode::CallDataCopy(dest, src, length)
+            }
+            130 => {
+                let (dest, src, length) = random_copy_range(rng);
+                Opcode::CodeCopy(dest, src, length)
+            }
+            131 => {
+                let (dest, src, length) = random_copy_range(rng);
+                Opcode::ExtCodeCopy(random_topic(rng), dest, src, length)
+            }
+            132 => Opcode::Stop,
+            133 => Opcode::Invalid,
+            134 => Opcode::CallDataLoad(rng.u16(..) as u64),
+            135 => {
+                let (offset, length) = random_memory_range(rng);
+                Opcode::Return(offset, length)
+            }
+            136 => {
+                let (offset, length) = random_memory_range(rng);
+                Opcode::Revert(offset, length)
+            }
+            137 => {
+                let (offset, length) = random_memory_range(rng);
+                Opcode::Keccak256(offset, length)
+            }
+            138 => Opcode::SelfDestruct(random_topic(rng)),
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         }
     }
@@ -791,8 +995,80 @@ impl Opcode {
             Opcode::Log4(offset, length, t1, t2, t3, t4) => {
                 render_log(0xA4, *offset, *length, &[*t1, *t2, *t3, *t4])
             }
+            Opcode::MStore8(offset, byte) => {
+                let mut out = Vec::with_capacity(2 + 9 + 1);
+                out.push(0x60); // PUSH1 byte
+                out.push(*byte);
+                out.push(0x67); // PUSH8 offset
+                out.extend_from_slice(&offset.to_be_bytes());
+                out.push(0x53); // MSTORE8
+                out
+            }
+            Opcode::MCopy(dest, src, length) => render_copy3(0x5E, *dest, *src, *length),
+            Opcode::CallDataCopy(dest, src, length) => render_copy3(0x37, *dest, *src, *length),
+            Opcode::CodeCopy(dest, src, length) => render_copy3(0x39, *dest, *src, *length),
+            Opcode::ExtCodeCopy(addr, dest, src, length) => {
+                let mut out = Vec::with_capacity(9 + 9 + 9 + 33 + 1);
+                out.push(0x67); // PUSH8 length
+                out.extend_from_slice(&length.to_be_bytes());
+                out.push(0x67); // PUSH8 srcOffset
+                out.extend_from_slice(&src.to_be_bytes());
+                out.push(0x67); // PUSH8 destOffset
+                out.extend_from_slice(&dest.to_be_bytes());
+                out.push(0x7F); // PUSH32 address
+                out.extend_from_slice(&addr.to_be_bytes::<32>());
+                out.push(0x3C); // EXTCODECOPY
+                out
+            }
+            Opcode::Stop => vec![0x00],
+            Opcode::Invalid => vec![0xFE],
+            Opcode::CallDataLoad(offset) => {
+                let mut out = Vec::with_capacity(1 + 8 + 1);
+                out.push(0x67); // PUSH8 offset
+                out.extend_from_slice(&offset.to_be_bytes());
+                out.push(0x35); // CALLDATALOAD
+                out
+            }
+            Opcode::Return(offset, length) => render_return_like(0xF3, *offset, *length),
+            Opcode::Revert(offset, length) => render_return_like(0xFD, *offset, *length),
+            Opcode::Keccak256(offset, length) => render_return_like(0x20, *offset, *length),
+            Opcode::SelfDestruct(beneficiary) => {
+                let mut out = Vec::with_capacity(1 + 32 + 1);
+                out.push(0x7F); // PUSH32 beneficiary
+                out.extend_from_slice(&beneficiary.to_be_bytes::<32>());
+                out.push(0xFF); // SELFDESTRUCT
+                out
+            }
         }
     }
+}
+
+/// Renders `[offset, length]` frame-terminating ops:
+/// PUSH8 length ‖ PUSH8 offset ‖ <opcode>. Pushed bottom-up so offset ends up on
+/// top of the stack as RETURN/REVERT expect.
+fn render_return_like(opcode: u8, offset: u64, length: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(9 + 9 + 1);
+    out.push(0x67); // PUSH8 length
+    out.extend_from_slice(&length.to_be_bytes());
+    out.push(0x67); // PUSH8 offset
+    out.extend_from_slice(&offset.to_be_bytes());
+    out.push(opcode);
+    out
+}
+
+/// Renders a `[destOffset, srcOffset, length]` copy op:
+/// PUSH8 length ‖ PUSH8 srcOffset ‖ PUSH8 destOffset ‖ <opcode>.
+/// Pushed bottom-up so destOffset ends up on top of the stack as the EVM expects.
+fn render_copy3(opcode: u8, dest: u64, src: u64, length: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(9 + 9 + 9 + 1);
+    out.push(0x67); // PUSH8 length
+    out.extend_from_slice(&length.to_be_bytes());
+    out.push(0x67); // PUSH8 srcOffset
+    out.extend_from_slice(&src.to_be_bytes());
+    out.push(0x67); // PUSH8 destOffset
+    out.extend_from_slice(&dest.to_be_bytes());
+    out.push(opcode);
+    out
 }
 
 /// Renders LOG_N as: PUSH32 topicN ‖ … ‖ PUSH32 topic1 ‖ PUSH8 length ‖ PUSH8 offset ‖ LOGN.

@@ -8,6 +8,7 @@ use crate::{
     opcodes::{Opcode},
     runner::RunSummary,
 };
+use revm::interpreter::OpCode;
 use revm::primitives::{ExecutionResult, HaltReason, OutOfGasError};
 use std::time::SystemTime;
 
@@ -17,7 +18,8 @@ fn main() {
         .unwrap()
         .as_secs();
     let mut rand = fastrand::Rng::with_seed(seed.clone());
-    for _ in 0..100 {
+    let mut totals = [0u64; 256];
+    for _ in 0..1000 {
         let machine_rand = fastrand::Rng::with_seed(seed);
         let gas = 3_00_000;
         let mut machine = Machine::new(gas, machine_rand);
@@ -28,6 +30,9 @@ fn main() {
             };
         }
         let run_summary = runner::run(&machine.bytecode(), gas as u64);
+        for (i, count) in run_summary.opcode_counts.iter().enumerate() {
+            totals[i] = totals[i].saturating_add(*count);
+        }
         match run_summary.result {
             ExecutionResult::Success {
                 reason,
@@ -71,6 +76,34 @@ fn main() {
                 };
             }
         }
+    }
+    print_opcode_summary(&totals);
+}
+
+fn print_opcode_summary(totals: &[u64; 256]) {
+    let mut ran: Vec<(&'static str, u64)> = Vec::new();
+    let mut not_ran: Vec<&'static str> = Vec::new();
+    for byte in 0u8..=255 {
+        if OpCode::new(byte).is_none() {
+            continue;
+        }
+        let name = OpCode::name_by_op(byte);
+        let count = totals[byte as usize];
+        if count > 0 {
+            ran.push((name, count));
+        } else {
+            not_ran.push(name);
+        }
+    }
+    ran.sort_by(|a, b| b.1.cmp(&a.1));
+
+    println!("\n=== Opcodes executed ({} distinct) ===", ran.len());
+    for (name, count) in &ran {
+        println!("  {:<16} {}", name, count);
+    }
+    println!("\n=== Opcodes never executed ({}) ===", not_ran.len());
+    for name in &not_ran {
+        println!("  {}", name);
     }
 }
 
