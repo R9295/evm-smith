@@ -316,6 +316,14 @@ fn build_state_test_json(
     })
 }
 
+fn write_bug_testcase(workdir: &Path, bytecode: &[u8], ctx: &WorkerContext) -> Result<PathBuf> {
+    let json_val = build_state_test_json(bytecode, ctx.sender, &ctx.sender_sk, ctx.cli.gas);
+    let json_bytes = serde_json::to_vec_pretty(&json_val)?;
+    let path = workdir.join("bug.json");
+    atomic_write(&path, &json_bytes)?;
+    Ok(path)
+}
+
 #[derive(Debug)]
 struct OkResult {
     state_root: String,
@@ -561,6 +569,7 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
             }
         } else {
             ctx.shared.mismatches.fetch_add(1, Ordering::Relaxed);
+            let bug_path = write_bug_testcase(&servers[0].workdir, &bytecode, ctx)?;
             let kind = if !state_match && !logs_match {
                 "STATE+LOGS MISMATCH"
             } else if !state_match {
@@ -580,6 +589,7 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
                     ok.logs_hash
                 ));
             }
+            output.push_str(&format!("  testcase: {}\n", bug_path.display()));
             output.push_str(&format!("  bytecode: {}\n", hex0x(&bytecode)));
             print_locked(&ctx.shared, &output);
             printed = true;
