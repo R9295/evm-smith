@@ -43,6 +43,12 @@ pub struct Machine {
     halted: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CreatedContractState {
+    address: Address,
+    nonce: u64,
+}
+
 impl Machine {
     pub fn new(gas: u64, rng: Rng, config: Config) -> Self {
         let caller = Address::from([0x11; 20]);
@@ -139,23 +145,94 @@ impl Machine {
         *nonce = nonce.checked_add(1).expect("nonce overflow");
     }
 
-    fn record_created_contract(&mut self, op: &Opcode) {
+    fn record_created_contract(
+        &mut self,
+        op: &Opcode,
+        created_state: Option<CreatedContractState>,
+    ) {
         match op {
             Opcode::Create(_init_code) => {
                 let creator = self.current_address();
-                let created_address = create_address(creator, self.nonce_of(creator));
+                let created_state = created_state.unwrap_or(CreatedContractState {
+                    address: create_address(creator, self.nonce_of(creator)),
+                    nonce: 1,
+                });
                 self.bump_nonce(creator);
-                self.nonces.entry(created_address).or_insert(1);
+                self.nonces
+                    .insert(created_state.address, created_state.nonce);
             }
             Opcode::Create2(init_code, salt) => {
                 let creator = self.current_address();
-                let created_address =
-                    creator.create2_from_code(salt.to_be_bytes::<32>(), init_code);
+                let created_state = created_state.unwrap_or(CreatedContractState {
+                    address: creator.create2_from_code(salt.to_be_bytes::<32>(), init_code),
+                    nonce: 1,
+                });
                 self.bump_nonce(creator);
-                self.nonces.entry(created_address).or_insert(1);
+                self.nonces
+                    .insert(created_state.address, created_state.nonce);
             }
             _ => {}
         }
+    }
+
+    fn validate_init_code_len(init_code_len: usize) -> anyhow::Result<(), Error> {
+        const MAX_INIT_CODE: usize = 49152;
+        if init_code_len > MAX_INIT_CODE {
+            return Err(Error::MaxInitCode);
+        }
+        Ok(())
+    }
+
+    fn create_sub_budget(&self) -> u64 {
+        let pct = self.config.create_gas_percentage as u64;
+        self.gas.saturating_mul(pct) / 100
+    }
+
+    fn build_generated_submachine(
+        &self,
+        sub_budget: u64,
+        gen_seed: u64,
+        machine_seed: u64,
+        current_address: Address,
+        caller: Address,
+    ) -> Self {
+        let mut sub_config = self.config.clone();
+        sub_config.allow_termination = false;
+        let mut sub_machine = Machine::with_context(
+            sub_budget,
+            Rng::with_seed(machine_seed),
+            sub_config,
+            current_address,
+            caller,
+            1,
+        );
+        let mut gen_rng = Rng::with_seed(gen_seed);
+        loop {
+            let inner = Opcode::generate(&mut gen_rng);
+            if sub_machine.ingest(inner).is_err() {
+                break;
+            }
+        }
+        sub_machine
+    }
+
+    fn render_init_code(sub_machine: &Machine) -> anyhow::Result<Vec<u8>, Error> {
+        // EIP-3860 caps init code at 49152 bytes; reserve 5 bytes for the
+        // appended RETURN(0, 0) tail (PUSH1 0, PUSH1 0, RETURN).
+        const MAX_INIT_CODE: usize = 49152 - 5;
+        const RETURN_TAIL: [u8; 5] = [0x60, 0x00, 0x60, 0x00, 0xF3];
+
+        let mut init_code: Vec<u8> = Vec::new();
+        for op in sub_machine.bytecode_ops() {
+            let rendered = op.render();
+            if init_code.len() + rendered.len() > MAX_INIT_CODE {
+                return Err(Error::MaxInitCode);
+            }
+            init_code.extend_from_slice(&rendered);
+        }
+        init_code.extend_from_slice(&RETURN_TAIL);
+        Self::validate_init_code_len(init_code.len())?;
+        Ok(init_code)
     }
 
     pub fn ingest(&mut self, op: Opcode) -> anyhow::Result<(), Error> {
@@ -168,15 +245,39 @@ impl Machine {
         // Materialize placeholder CREATE/CREATE2 ops (empty payloads from
         // `Opcode::generate`) now that we have access to the outer machine's
         // gas budget and RNG.
-        let op = match op {
+        let (op, pending_created_state) = match op {
             Opcode::Create(ref payload) if payload.is_empty() => {
-                Opcode::Create(self.build_init_code())
+                let creator = self.current_address();
+                let created_address = create_address(creator, self.nonce_of(creator));
+                let init = self.build_init_code(created_address)?;
+                (
+                    Opcode::Create(init.code),
+                    Some(CreatedContractState {
+                        address: created_address,
+                        nonce: init.created_nonce,
+                    }),
+                )
             }
             Opcode::Create2(ref payload, salt) if payload.is_empty() => {
-                Opcode::Create2(self.build_init_code(), salt)
+                let creator = self.current_address();
+                let init = self.build_create2_init_code(creator, salt)?;
+                (
+                    Opcode::Create2(init.code, salt),
+                    Some(CreatedContractState {
+                        address: init.address,
+                        nonce: init.created_nonce,
+                    }),
+                )
             }
-            other => other,
+            other => (other, None),
         };
+        match &op {
+            Opcode::Create(init_code) | Opcode::Create2(init_code, _) => {
+                Self::validate_init_code_len(init_code.len())?;
+            }
+            _ => {}
+        }
+        let mut pending_created_state = pending_created_state;
         let mut stack = vec![op];
         while let Some(op) = stack.pop() {
             let requires = op.requires(self);
@@ -195,7 +296,12 @@ impl Machine {
                     }
                 }
                 self.memory = self.memory.saturating_add(provides.memory());
-                self.record_created_contract(&op);
+                let created_state = if matches!(op, Opcode::Create(_) | Opcode::Create2(_, _)) {
+                    pending_created_state.take()
+                } else {
+                    None
+                };
+                self.record_created_contract(&op, created_state);
                 debug_assert!(self.stack.len() <= 1024);
                 let terminating = op.is_terminating();
                 self.bytecode.push(op);
@@ -230,10 +336,10 @@ impl Machine {
     /// Generates the init code shared by CREATE and CREATE2: spawns a fresh
     /// sub-machine with `allow_termination = false` and a fraction of the
     /// outer's *current* remaining gas (per the configured percentage), runs
-    /// the same generation loop as `main`, then truncates at the last
-    /// whole-opcode boundary that fits under the EIP-3860 init code limit and
-    /// appends a `RETURN(0, 0)` so the deploy frame returns empty runtime
-    /// code (always passes EIP-170 / EIP-3541).
+    /// the same generation loop as `main`, then either returns
+    /// `Error::MaxInitCode` when another opcode would exceed the EIP-3860
+    /// init code limit or appends a `RETURN(0, 0)` so the deploy frame
+    /// returns empty runtime code (always passes EIP-170 / EIP-3541).
     ///
     /// Nested CREATE/CREATE2 is allowed: the inner generator can itself draw
     /// one, which recursively materializes at the next depth. Recursion is
@@ -250,47 +356,65 @@ impl Machine {
     /// continues with only the 1/64 retained portion. That doesn't violate
     /// any outer invariant (the harness still doesn't panic), but the inner
     /// deploy simply produces no contract.
-    fn build_init_code(&mut self) -> Vec<u8> {
-        // EIP-3860 caps init code at 49152 bytes; reserve 5 bytes for the
-        // appended RETURN(0, 0) tail (PUSH1 0, PUSH1 0, RETURN).
-        const MAX_INIT_CODE: usize = 49152 - 5;
-
-        let pct = self.config.create_gas_percentage as u64;
-        let sub_budget = self.gas.saturating_mul(pct) / 100;
+    fn build_init_code(
+        &mut self,
+        current_address: Address,
+    ) -> anyhow::Result<GeneratedInitCode, Error> {
+        let sub_budget = self.create_sub_budget();
         // Fork two independent RNGs from the outer's so the sub-machine's
         // internal constraint solver and the inner generator don't share state.
         let gen_seed = self.rng.u64(..);
         let machine_seed = self.rng.u64(..);
         let creator = self.current_address();
-        let mut sub_config = self.config.clone();
-        sub_config.allow_termination = false;
-        let mut sub_machine = Machine::with_context(
+        let sub_machine = self.build_generated_submachine(
             sub_budget,
-            Rng::with_seed(machine_seed),
-            sub_config,
+            gen_seed,
+            machine_seed,
+            current_address,
+            creator,
+        );
+        let init_code = Self::render_init_code(&sub_machine)?;
+        Ok(GeneratedInitCode {
+            address: current_address,
+            code: init_code,
+            created_nonce: sub_machine.nonce_of(current_address),
+        })
+    }
+
+    fn build_create2_init_code(
+        &mut self,
+        creator: Address,
+        salt: U256,
+    ) -> anyhow::Result<GeneratedInitCode, Error> {
+        let sub_budget = self.create_sub_budget();
+        let gen_seed = self.rng.u64(..);
+        let machine_seed = self.rng.u64(..);
+
+        let probe_machine = self.build_generated_submachine(
+            sub_budget,
+            gen_seed,
+            machine_seed,
             Address::ZERO,
             creator,
-            1,
         );
-        let mut gen_rng = Rng::with_seed(gen_seed);
-        loop {
-            let inner = Opcode::generate(&mut gen_rng);
-            if sub_machine.ingest(inner).is_err() {
-                break;
-            }
-        }
+        let probe_code = Self::render_init_code(&probe_machine)?;
+        let created_address = creator.create2_from_code(salt.to_be_bytes::<32>(), &probe_code);
 
-        let mut init_code: Vec<u8> = Vec::new();
-        for op in sub_machine.bytecode_ops() {
-            let rendered = op.render();
-            if init_code.len() + rendered.len() > MAX_INIT_CODE {
-                break;
-            }
-            init_code.extend_from_slice(&rendered);
-        }
-        // PUSH1 0 (length), PUSH1 0 (offset), RETURN.
-        init_code.extend_from_slice(&[0x60, 0x00, 0x60, 0x00, 0xF3]);
-        init_code
+        let final_machine = self.build_generated_submachine(
+            sub_budget,
+            gen_seed,
+            machine_seed,
+            created_address,
+            creator,
+        );
+        let final_code = Self::render_init_code(&final_machine)?;
+        debug_assert_eq!(probe_code, final_code);
+
+        Ok(GeneratedInitCode {
+            address: created_address,
+            code: final_code,
+            created_nonce: final_machine.nonce_of(created_address),
+        })
     }
 
     pub fn constraints(&self, requires: &Resource, provides: &Resource) -> Option<Resource> {
@@ -326,6 +450,13 @@ impl Machine {
             )
         }
     }
+}
+
+#[derive(Debug)]
+struct GeneratedInitCode {
+    address: Address,
+    code: Vec<u8>,
+    created_nonce: u64,
 }
 
 fn create_address(caller: Address, nonce: u64) -> Address {
@@ -408,5 +539,15 @@ mod tests {
         assert_eq!(machine.nonces.get(&caller), Some(&1));
         assert_eq!(machine.nonces.get(&code_addr), Some(&2));
         assert_eq!(machine.nonces.get(&created), Some(&1));
+    }
+
+    #[test]
+    fn oversized_init_code_returns_max_init_code() {
+        let mut machine = Machine::new(10_000_000, Rng::with_seed(13), Config::default());
+        let oversized = vec![0u8; 49_153];
+
+        let err = machine.ingest(Opcode::Create(oversized)).unwrap_err();
+
+        assert_eq!(err, Error::MaxInitCode);
     }
 }
