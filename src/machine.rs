@@ -337,6 +337,50 @@ impl Machine {
                     None,
                 )
             }
+            Opcode::StaticCall {
+                address,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            } if address == Address::ZERO => {
+                let materialized_gas = self.gas / 4;
+                let target = self.pick_callable_address();
+                (
+                    Opcode::StaticCall {
+                        gas: materialized_gas,
+                        address: target,
+                        args_offset,
+                        args_size,
+                        ret_offset,
+                        ret_size,
+                    },
+                    None,
+                )
+            }
+            Opcode::DelegateCall {
+                address,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            } if address == Address::ZERO => {
+                let materialized_gas = self.gas / 4;
+                let target = self.pick_callable_address();
+                (
+                    Opcode::DelegateCall {
+                        gas: materialized_gas,
+                        address: target,
+                        args_offset,
+                        args_size,
+                        ret_offset,
+                        ret_size,
+                    },
+                    None,
+                )
+            }
             other => (other, None),
         };
         match &op {

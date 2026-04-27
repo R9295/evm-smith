@@ -42,7 +42,7 @@ pub enum Opcode {
     Eq,
     IsZero,
 
-    // Bitwise (0x16..0x1D)
+    // Bitwise (0x16..0x1E)
     And,
     Or,
     Xor,
@@ -51,6 +51,8 @@ pub enum Opcode {
     Shl,
     Shr,
     Sar,
+    // Count leading zeros (EIP-7939, Osaka).
+    Clz,
 
     // Environmental info (0x30..0x3F)
     Address,
@@ -237,6 +239,31 @@ pub enum Opcode {
         ret_offset: u64,
         ret_size: u64,
     },
+
+    // STATICCALL (0xFA). Same layout as CALL minus the value argument. The
+    // sub-frame can't perform state-modifying ops; with our empty-code
+    // targets it's a no-op anyway. Materialization mirrors CALL.
+    StaticCall {
+        gas: u64,
+        address: Address,
+        args_offset: u64,
+        args_size: u64,
+        ret_offset: u64,
+        ret_size: u64,
+    },
+
+    // DELEGATECALL (0xF4). Same layout as STATICCALL. Executes the callee's
+    // code in the caller's storage / sender / value context — but our
+    // targets have empty code, so the sub-frame is a no-op. Materialization
+    // mirrors CALL.
+    DelegateCall {
+        gas: u64,
+        address: Address,
+        args_offset: u64,
+        args_size: u64,
+        ret_offset: u64,
+        ret_size: u64,
+    },
 }
 
 /// Memory size required to access `offset..offset+length`. EVM does no memory
@@ -313,6 +340,9 @@ impl Opcode {
 
             // 3 gas, 1 stack (unary verylow ops)
             Opcode::IsZero | Opcode::Not => Resource::builder().stack(1).gas(3).build(),
+
+            // 5 gas, 1 stack (CLZ — EIP-7939, Osaka).
+            Opcode::Clz => Resource::builder().stack(1).gas(5).build(),
 
             // 5 gas, 2 stack (low ops)
             Opcode::Mul
@@ -695,6 +725,38 @@ impl Opcode {
                     .saturating_add(*gas);
                 Resource::builder().stack_reserved(7).gas(total).build()
             }
+            // STATICCALL / DELEGATECALL: same shape as CALL minus the value
+            // arg. Push gas drops to 18 (4·PUSH8 + PUSH20 + PUSH8) and only
+            // 6 inline pushes get reserved on the stack.
+            Opcode::StaticCall {
+                gas,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            }
+            | Opcode::DelegateCall {
+                gas,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            } => {
+                let args_region = memory_range_size(*args_offset, *args_size);
+                let ret_region = memory_range_size(*ret_offset, *ret_size);
+                let needed = args_region.max(ret_region);
+                let mem_expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let push_gas = 4 * 3 + 3 + 3; // 4·PUSH8 + PUSH20 + PUSH8
+                let base = 100u64;
+                let total = base
+                    .saturating_add(push_gas)
+                    .saturating_add(mem_expansion)
+                    .saturating_add(*gas);
+                Resource::builder().stack_reserved(6).gas(total).build()
+            }
         }
     }
 
@@ -780,9 +842,24 @@ impl Opcode {
                 let increment = new_mem.saturating_sub(machine.memory());
                 Resource::builder().stack(1).memory(increment).build()
             }
-            // CALL pushes the 0/1 success flag and may grow memory to cover
-            // both the args input and ret output regions.
+            // CALL / STATICCALL / DELEGATECALL push the 0/1 success flag
+            // and may grow memory to cover the args input and ret output
+            // regions.
             Opcode::Call {
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            }
+            | Opcode::StaticCall {
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            }
+            | Opcode::DelegateCall {
                 args_offset,
                 args_size,
                 ret_offset,
@@ -819,7 +896,7 @@ impl Opcode {
     /// Returns a uniformly-random `Opcode` variant. For `Push*` variants the
     /// immediate-byte array is filled with random bytes from `rng`.
     pub fn generate(rng: &mut Rng) -> Opcode {
-        const VARIANT_COUNT: usize = 141;
+        const VARIANT_COUNT: usize = 144;
         Self::nth_variant(rng.usize(0..VARIANT_COUNT), rng)
     }
 
@@ -1182,6 +1259,33 @@ impl Opcode {
                     ret_size,
                 }
             }
+            // STATICCALL / DELEGATECALL placeholders. Same materialization
+            // rules as CALL.
+            141 => {
+                let (args_offset, args_size) = random_memory_range(rng);
+                let (ret_offset, ret_size) = random_memory_range(rng);
+                Opcode::StaticCall {
+                    gas: 0,
+                    address: Address::ZERO,
+                    args_offset,
+                    args_size,
+                    ret_offset,
+                    ret_size,
+                }
+            }
+            142 => {
+                let (args_offset, args_size) = random_memory_range(rng);
+                let (ret_offset, ret_size) = random_memory_range(rng);
+                Opcode::DelegateCall {
+                    gas: 0,
+                    address: Address::ZERO,
+                    args_offset,
+                    args_size,
+                    ret_offset,
+                    ret_size,
+                }
+            }
+            143 => Opcode::Clz,
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         }
     }
@@ -1213,6 +1317,7 @@ impl Opcode {
             Opcode::Shl => vec![0x1B],
             Opcode::Shr => vec![0x1C],
             Opcode::Sar => vec![0x1D],
+            Opcode::Clz => vec![0x1E],
             Opcode::Address => vec![0x30],
             Opcode::Balance => vec![0x31],
             Opcode::Origin => vec![0x32],
@@ -1393,6 +1498,38 @@ impl Opcode {
                 *ret_offset,
                 *ret_size,
             ),
+            Opcode::StaticCall {
+                gas,
+                address,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+            } => render_call_no_value(
+                0xFA,
+                *gas,
+                *address,
+                *args_offset,
+                *args_size,
+                *ret_offset,
+                *ret_size,
+            ),
+            Opcode::DelegateCall {
+                gas,
+                address,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+            } => render_call_no_value(
+                0xF4,
+                *gas,
+                *address,
+                *args_offset,
+                *args_size,
+                *ret_offset,
+                *ret_size,
+            ),
         }
     }
 }
@@ -1453,6 +1590,36 @@ fn render_create2(init_code: &[u8], salt: U256) -> Vec<u8> {
     out.push(0x60); // PUSH1 0 (value)
     out.push(0x00);
     out.push(0xF5); // CREATE2
+    out
+}
+
+/// Renders STATICCALL (0xFA) or DELEGATECALL (0xF4). Same arg layout as CALL
+/// minus the `value` argument. Pushes the 6 args bottom-up so the opcode pops
+/// them in the canonical order (gas on top, then addr, argsOffset, argsSize,
+/// retOffset, retSize).
+fn render_call_no_value(
+    opcode: u8,
+    gas: u64,
+    address: Address,
+    args_offset: u64,
+    args_size: u64,
+    ret_offset: u64,
+    ret_size: u64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(9 + 9 + 9 + 9 + 21 + 9 + 1);
+    out.push(0x67); // PUSH8 retSize
+    out.extend_from_slice(&ret_size.to_be_bytes());
+    out.push(0x67); // PUSH8 retOffset
+    out.extend_from_slice(&ret_offset.to_be_bytes());
+    out.push(0x67); // PUSH8 argsSize
+    out.extend_from_slice(&args_size.to_be_bytes());
+    out.push(0x67); // PUSH8 argsOffset
+    out.extend_from_slice(&args_offset.to_be_bytes());
+    out.push(0x73); // PUSH20 address
+    out.extend_from_slice(address.as_slice());
+    out.push(0x67); // PUSH8 gas
+    out.extend_from_slice(&gas.to_be_bytes());
+    out.push(opcode);
     out
 }
 
