@@ -229,19 +229,16 @@ fn scratch_base_dir() -> PathBuf {
     }
 }
 
-fn create_random_workdir() -> Result<PathBuf> {
+fn create_core_workdir(core_id: usize) -> Result<PathBuf> {
     let base = scratch_base_dir();
-    for _ in 0..100 {
-        let path = base.join(format!("evm-fuzz-{:016x}", fastrand::u64(..)));
-        match fs::create_dir(&path) {
-            Ok(()) => return Ok(path),
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
-            Err(e) => {
-                return Err(e).with_context(|| format!("creating workdir {}", path.display()));
-            }
-        }
+    let path = base.join(format!("evm-fuzz-core-{core_id}"));
+    match fs::remove_dir_all(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("removing workdir {}", path.display())),
     }
-    bail!("failed to create a unique workdir in {}", base.display())
+    fs::create_dir(&path).with_context(|| format!("creating workdir {}", path.display()))?;
+    Ok(path)
 }
 
 fn derive_sender(sk: &[u8; 32]) -> Result<Address> {
@@ -601,7 +598,7 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
 }
 
 fn run_worker(ctx: WorkerContext) -> Result<()> {
-    let workdir = create_random_workdir()?;
+    let workdir = create_core_workdir(ctx.id)?;
     print_locked(
         &ctx.shared,
         &format!("worker {} workdir: {}\n", ctx.id, workdir.display()),
