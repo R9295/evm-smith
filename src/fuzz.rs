@@ -531,6 +531,7 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
     let mut printed = false;
     if any_fail {
         ctx.shared.fails.fetch_add(1, Ordering::Relaxed);
+        let bug_path = write_bug_testcase(&servers[0].workdir, &bytecode, ctx)?;
         output.push_str(&format!(
             "worker {} iter {iter} (seed {machine_seed}): FAIL\n",
             ctx.id
@@ -549,6 +550,7 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
                 }
             }
         }
+        output.push_str(&format!("  testcase: {}\n", bug_path.display()));
         output.push_str(&format!("  bytecode: {}\n", hex0x(&bytecode)));
         print_locked(&ctx.shared, &output);
         printed = true;
