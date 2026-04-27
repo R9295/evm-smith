@@ -1,7 +1,7 @@
 mod resource;
 pub use resource::*;
 
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use fastrand::Rng;
 
 use crate::machine::Machine;
@@ -215,6 +215,28 @@ pub enum Opcode {
     // <MSTORE chain> ‖ PUSH32 salt ‖ PUSH8 size ‖ PUSH1 0 (offset) ‖
     // PUSH1 0 (value) ‖ CREATE2.
     Create2(Vec<u8>, U256),
+
+    // CALL (0xF1). Memory ranges (`args_*`, `ret_*`) are sampled at generate
+    // time; `gas` and `address` are materialized lazily by `Machine::ingest`
+    // from outer state (gas = 25% of remaining; address = random pick from
+    // `Machine::callable_addresses`). Placeholder form has `address ==
+    // Address::ZERO`.
+    //
+    // The target is always an address with empty runtime code (caller of root,
+    // or contracts created via our CREATE/CREATE2 — their init returns 0
+    // bytes). That keeps the sub-call a no-op so the symbolic and runtime
+    // state stay in sync without us tracking sub-frame effects.
+    //
+    // Rendered as: PUSH8 retSize ‖ PUSH8 retOffset ‖ PUSH8 argsSize ‖
+    // PUSH8 argsOffset ‖ PUSH0 (value=0) ‖ PUSH20 address ‖ PUSH8 gas ‖ CALL.
+    Call {
+        gas: u64,
+        address: Address,
+        args_offset: u64,
+        args_size: u64,
+        ret_offset: u64,
+        ret_size: u64,
+    },
 }
 
 /// Memory size required to access `offset..offset+length`. EVM does no memory
@@ -644,6 +666,35 @@ impl Opcode {
                     .saturating_add(sub_charge);
                 Resource::builder().stack_reserved(4).gas(total).build()
             }
+            // CALL outer charge: 100 (warm base — all targets are pre-warmed)
+            // + 20 (push gas: 4·PUSH8 + PUSH0 + PUSH20 + PUSH8) + memory
+            // expansion (max of args and ret regions) + `gas` (the forwarded
+            // budget, baked in at materialization). Worst case the EVM forwards
+            // exactly `gas` and the sub-frame consumes all of it.
+            //
+            // Stack model: stack_reserved(7) for the 7 inline pushes; CALL
+            // pops them and pushes the success flag.
+            Opcode::Call {
+                gas,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            } => {
+                let args_region = memory_range_size(*args_offset, *args_size);
+                let ret_region = memory_range_size(*ret_offset, *ret_size);
+                let needed = args_region.max(ret_region);
+                let mem_expansion = memory_word_cost(needed)
+                    .saturating_sub(memory_word_cost(machine.memory()));
+                let push_gas = 4 * 3 + 2 + 3 + 3; // 4·PUSH8 + PUSH0 + PUSH20 + PUSH8
+                let base = 100u64;
+                let total = base
+                    .saturating_add(push_gas)
+                    .saturating_add(mem_expansion)
+                    .saturating_add(*gas);
+                Resource::builder().stack_reserved(7).gas(total).build()
+            }
         }
     }
 
@@ -729,6 +780,21 @@ impl Opcode {
                 let increment = new_mem.saturating_sub(machine.memory());
                 Resource::builder().stack(1).memory(increment).build()
             }
+            // CALL pushes the 0/1 success flag and may grow memory to cover
+            // both the args input and ret output regions.
+            Opcode::Call {
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            } => {
+                let args_region = memory_range_size(*args_offset, *args_size);
+                let ret_region = memory_range_size(*ret_offset, *ret_size);
+                let needed = args_region.max(ret_region);
+                let increment = needed.saturating_sub(machine.memory());
+                Resource::builder().stack(1).memory(increment).build()
+            }
             // DUP_n leaves n+1 items; SWAP_n leaves n+1 items.
             Opcode::Dup1 | Opcode::Swap1 => Resource::builder().stack(2).build(),
             Opcode::Dup2 | Opcode::Swap2 => Resource::builder().stack(3).build(),
@@ -753,7 +819,7 @@ impl Opcode {
     /// Returns a uniformly-random `Opcode` variant. For `Push*` variants the
     /// immediate-byte array is filled with random bytes from `rng`.
     pub fn generate(rng: &mut Rng) -> Opcode {
-        const VARIANT_COUNT: usize = 140;
+        const VARIANT_COUNT: usize = 141;
         Self::nth_variant(rng.usize(0..VARIANT_COUNT), rng)
     }
 
@@ -1101,6 +1167,21 @@ impl Opcode {
             // CREATE2 placeholder; salt is sampled now (it does not depend on
             // outer machine state), init code is materialized lazily.
             139 => Opcode::Create2(Vec::new(), random_topic(rng)),
+            // CALL placeholder. Memory ranges are sampled now; gas and target
+            // address are filled in by `Machine::ingest` (they depend on outer
+            // state). The placeholder is detected by `address == Address::ZERO`.
+            140 => {
+                let (args_offset, args_size) = random_memory_range(rng);
+                let (ret_offset, ret_size) = random_memory_range(rng);
+                Opcode::Call {
+                    gas: 0,
+                    address: Address::ZERO,
+                    args_offset,
+                    args_size,
+                    ret_offset,
+                    ret_size,
+                }
+            }
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         }
     }
@@ -1297,6 +1378,21 @@ impl Opcode {
             }
             Opcode::Create(init_code) => render_create(init_code),
             Opcode::Create2(init_code, salt) => render_create2(init_code, *salt),
+            Opcode::Call {
+                gas,
+                address,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+            } => render_call(
+                *gas,
+                *address,
+                *args_offset,
+                *args_size,
+                *ret_offset,
+                *ret_size,
+            ),
         }
     }
 }
@@ -1357,6 +1453,36 @@ fn render_create2(init_code: &[u8], salt: U256) -> Vec<u8> {
     out.push(0x60); // PUSH1 0 (value)
     out.push(0x00);
     out.push(0xF5); // CREATE2
+    out
+}
+
+/// Renders a CALL region. Pushes the 7 args bottom-up so CALL pops them in the
+/// canonical order (gas on top, then addr, value, argsOffset, argsSize,
+/// retOffset, retSize). Value is hard-coded to 0; `address` is rendered as
+/// PUSH20 (zero-extended on the stack to U256, low 160 bits read by CALL).
+fn render_call(
+    gas: u64,
+    address: Address,
+    args_offset: u64,
+    args_size: u64,
+    ret_offset: u64,
+    ret_size: u64,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(9 + 9 + 9 + 9 + 1 + 21 + 9 + 1);
+    out.push(0x67); // PUSH8 retSize
+    out.extend_from_slice(&ret_size.to_be_bytes());
+    out.push(0x67); // PUSH8 retOffset
+    out.extend_from_slice(&ret_offset.to_be_bytes());
+    out.push(0x67); // PUSH8 argsSize
+    out.extend_from_slice(&args_size.to_be_bytes());
+    out.push(0x67); // PUSH8 argsOffset
+    out.extend_from_slice(&args_offset.to_be_bytes());
+    out.push(0x5F); // PUSH0 (value = 0)
+    out.push(0x73); // PUSH20 address
+    out.extend_from_slice(address.as_slice());
+    out.push(0x67); // PUSH8 gas
+    out.extend_from_slice(&gas.to_be_bytes());
+    out.push(0xF1); // CALL
     out
 }
 

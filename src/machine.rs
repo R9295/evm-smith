@@ -18,6 +18,12 @@ pub struct Config {
     /// SELFDESTRUCT) drawn by the generator are silently skipped instead of
     /// halting the machine.
     pub allow_termination: bool,
+    /// When `true`, CREATE/CREATE2 grows `callable_addresses` with the new
+    /// contract. Disabled inside sub-machines so the rendered init code is
+    /// identical across the CREATE2 probe/final passes (the new address would
+    /// otherwise depend on sub `current_address`, which differs between the
+    /// passes by construction).
+    pub grow_callable_on_create: bool,
 }
 
 impl Default for Config {
@@ -25,6 +31,7 @@ impl Default for Config {
         Self {
             create_gas_percentage: 50,
             allow_termination: true,
+            grow_callable_on_create: true,
         }
     }
 }
@@ -38,6 +45,14 @@ pub struct Machine {
     address_stack: Vec<Address>,
     call_stack: Vec<Address>,
     nonces: HashMap<Address, u64>,
+    /// Curated list of CALL targets that we know have empty runtime code, so
+    /// the sub-frame is a no-op and symbolic / runtime state stay in sync.
+    /// Seeded with the safe baseline (root: caller; sub-machine: its own
+    /// being-deployed `current_address`) and grown by every CREATE / CREATE2
+    /// (their init returns 0 bytes via the appended `RETURN(0, 0)` tail).
+    /// Notably excludes the root `code_addr` — calling it would recurse into
+    /// the test bytecode and bump the creator's nonce in unobservable ways.
+    callable_addresses: Vec<Address>,
     memory: u64,
     bytecode: Vec<Opcode>,
     halted: bool,
@@ -53,7 +68,11 @@ impl Machine {
     pub fn new(gas: u64, rng: Rng, config: Config) -> Self {
         let caller = Address::from([0x11; 20]);
         let current_address = Address::from([0x42; 20]);
-        let mut machine = Self::with_context(gas, rng, config, current_address, caller, 1);
+        // Root: the only safe initial CALL target is `caller` (a pre-funded
+        // EOA with no code). `current_address` is the test contract — it has
+        // code, so excluded.
+        let mut machine =
+            Self::with_context(gas, rng, config, current_address, caller, 1, vec![caller]);
         // Match EVM transaction execution semantics: the tx sender's nonce is
         // bumped before any bytecode runs.
         machine.bump_nonce(caller);
@@ -67,6 +86,7 @@ impl Machine {
         current_address: Address,
         caller: Address,
         current_nonce: u64,
+        callable_addresses: Vec<Address>,
     ) -> Self {
         let mut nonces = HashMap::from([(caller, 0)]);
         nonces.insert(current_address, current_nonce);
@@ -79,6 +99,7 @@ impl Machine {
             address_stack: vec![current_address],
             call_stack: vec![caller],
             nonces,
+            callable_addresses,
             bytecode: vec![],
             halted: false,
         }
@@ -145,6 +166,11 @@ impl Machine {
         *nonce = nonce.checked_add(1).expect("nonce overflow");
     }
 
+    fn pick_callable_address(&mut self) -> Address {
+        let idx = self.rng.usize(0..self.callable_addresses.len());
+        self.callable_addresses[idx]
+    }
+
     fn record_created_contract(
         &mut self,
         op: &Opcode,
@@ -160,6 +186,9 @@ impl Machine {
                 self.bump_nonce(creator);
                 self.nonces
                     .insert(created_state.address, created_state.nonce);
+                if self.config.grow_callable_on_create {
+                    self.callable_addresses.push(created_state.address);
+                }
             }
             Opcode::Create2(init_code, salt) => {
                 let creator = self.current_address();
@@ -170,6 +199,9 @@ impl Machine {
                 self.bump_nonce(creator);
                 self.nonces
                     .insert(created_state.address, created_state.nonce);
+                if self.config.grow_callable_on_create {
+                    self.callable_addresses.push(created_state.address);
+                }
             }
             _ => {}
         }
@@ -198,6 +230,14 @@ impl Machine {
     ) -> Self {
         let mut sub_config = self.config.clone();
         sub_config.allow_termination = false;
+        sub_config.grow_callable_on_create = false;
+        // Sub-machine inherits the parent's `callable_addresses` so CALL
+        // target selection is independent of the sub's `current_address`.
+        // That matters for CREATE2: `build_create2_init_code` runs two passes
+        // (probe with placeholder address, final with the derived address),
+        // and the rendered bytecode must be identical across both — otherwise
+        // the keccak-derived create2 address diverges from runtime. The
+        // parent's set already contains only safe (empty-code) targets.
         let mut sub_machine = Machine::with_context(
             sub_budget,
             Rng::with_seed(machine_seed),
@@ -205,6 +245,7 @@ impl Machine {
             current_address,
             caller,
             1,
+            self.callable_addresses.clone(),
         );
         let mut gen_rng = Rng::with_seed(gen_seed);
         loop {
@@ -267,6 +308,33 @@ impl Machine {
                         address: init.address,
                         nonce: init.created_nonce,
                     }),
+                )
+            }
+            // CALL materialization: pick the gas to forward (25% of remaining
+            // outer gas) and a target address from the curated callable set.
+            // The carried `gas` is what the rendered region pushes, so it must
+            // match what `requires` charges — keep both in sync via the field
+            // baked into the variant here.
+            Opcode::Call {
+                address,
+                args_offset,
+                args_size,
+                ret_offset,
+                ret_size,
+                ..
+            } if address == Address::ZERO => {
+                let materialized_gas = self.gas / 4;
+                let target = self.pick_callable_address();
+                (
+                    Opcode::Call {
+                        gas: materialized_gas,
+                        address: target,
+                        args_offset,
+                        args_size,
+                        ret_offset,
+                        ret_size,
+                    },
+                    None,
                 )
             }
             other => (other, None),
@@ -549,5 +617,130 @@ mod tests {
         let err = machine.ingest(Opcode::Create(oversized)).unwrap_err();
 
         assert_eq!(err, Error::MaxInitCode);
+    }
+
+    /// Demonstrates the invariant violation that `grow_callable_on_create =
+    /// false` protects in sub-machines built for CREATE2.
+    ///
+    /// CREATE2's address derivation runs the sub-machine twice with the same
+    /// seeds but DIFFERENT `current_address` (probe = `Address::ZERO`, final =
+    /// the predicted address). For the predicted address to match what the
+    /// runtime computes, both passes must render identical bytecode. With
+    /// `grow_callable_on_create = true`, a nested CREATE inside the sub
+    /// appends `create_address(sub.current_address, nonce)` to
+    /// `callable_addresses` — and that entry differs between probe and final
+    /// because `current_address` does. A subsequent CALL that picks that
+    /// entry bakes 20 different bytes into the rendered bytecode via PUSH20.
+    #[test]
+    fn nested_create_taints_callable_when_grow_on_create_is_true() {
+        let caller = Address::from([0x11; 20]);
+        let mut config = Config::default();
+        config.allow_termination = false;
+        config.grow_callable_on_create = true; // bug-prone configuration
+
+        let make_sub = |current_address: Address| {
+            Machine::with_context(
+                10_000_000,
+                Rng::with_seed(0),
+                config.clone(),
+                current_address,
+                caller,
+                1,
+                vec![caller],
+            )
+        };
+
+        // Probe pass uses Address::ZERO; final pass stands in for the
+        // predicted CREATE2 address.
+        let mut probe = make_sub(Address::ZERO);
+        let mut finalised = make_sub(Address::from([0x42; 20]));
+
+        // Concrete init code (RETURN(0,0)) so ingest doesn't recurse into a
+        // sub-sub-machine — that would obscure the leak we're isolating.
+        let init_code = vec![0x60, 0x00, 0x60, 0x00, 0xF3];
+        probe.ingest(Opcode::Create(init_code.clone())).unwrap();
+        finalised.ingest(Opcode::Create(init_code)).unwrap();
+
+        // (1) callable_addresses now diverges. Index 0 (the inherited
+        //     caller) matches; index 1 — the just-pushed nested-CREATE
+        //     address — does not, because it's
+        //     `create_address(current_address, 1)`.
+        assert_eq!(probe.callable_addresses[0], caller);
+        assert_eq!(finalised.callable_addresses[0], caller);
+        assert_ne!(
+            probe.callable_addresses[1],
+            finalised.callable_addresses[1],
+            "nested CREATE leaks current_address into callable_addresses"
+        );
+
+        // (2) Rendering a CALL with the diverging entry produces bytecode
+        //     that differs in exactly the 20 bytes of the PUSH20 immediate
+        //     — that is the divergence that would propagate through
+        //     keccak256 and produce a wrong CREATE2 address.
+        let render_call_to = |target: Address| {
+            Opcode::Call {
+                gas: 1_000,
+                address: target,
+                args_offset: 0,
+                args_size: 0,
+                ret_offset: 0,
+                ret_size: 0,
+            }
+            .render()
+        };
+        let probe_call = render_call_to(probe.callable_addresses[1]);
+        let final_call = render_call_to(finalised.callable_addresses[1]);
+
+        assert_eq!(probe_call.len(), final_call.len());
+        let diverging = probe_call
+            .iter()
+            .zip(final_call.iter())
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(diverging, 20, "exactly the PUSH20 address bytes diverge");
+    }
+
+    /// Counterpart to the previous test showing the fix in production code:
+    /// with `grow_callable_on_create = false`, the nested CREATE still bumps
+    /// nonces and tracks the new contract in `nonces`, but doesn't mutate
+    /// `callable_addresses` — so probe and final passes carry identical
+    /// callable lists, which is what makes their rendered bytecode match.
+    #[test]
+    fn nested_create_leaves_callable_alone_when_grow_on_create_is_false() {
+        let caller = Address::from([0x11; 20]);
+        let mut config = Config::default();
+        config.allow_termination = false;
+        config.grow_callable_on_create = false; // production setting in subs
+
+        let make_sub = |current_address: Address| {
+            Machine::with_context(
+                10_000_000,
+                Rng::with_seed(0),
+                config.clone(),
+                current_address,
+                caller,
+                1,
+                vec![caller],
+            )
+        };
+
+        let mut probe = make_sub(Address::ZERO);
+        let mut finalised = make_sub(Address::from([0x42; 20]));
+
+        let init_code = vec![0x60, 0x00, 0x60, 0x00, 0xF3];
+        probe.ingest(Opcode::Create(init_code.clone())).unwrap();
+        finalised.ingest(Opcode::Create(init_code)).unwrap();
+
+        // callable_addresses is identical (no append) → no leak path.
+        assert_eq!(probe.callable_addresses, vec![caller]);
+        assert_eq!(finalised.callable_addresses, vec![caller]);
+
+        // Nonces still diverge — that's expected, but it doesn't affect
+        // rendered bytecode. The outer doesn't read sub's internal nonce
+        // map; it only reads `nonce_of(current_address)`, which is the
+        // count of nested CREATEs (deterministic from the seed).
+        let probe_nested_nonce = probe.nonce_of(Address::ZERO);
+        let final_nested_nonce = finalised.nonce_of(Address::from([0x42; 20]));
+        assert_eq!(probe_nested_nonce, final_nested_nonce);
     }
 }
