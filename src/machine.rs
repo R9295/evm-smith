@@ -462,7 +462,9 @@ impl Machine {
     }
 
     pub fn bytecode(&self) -> Vec<u8> {
-        self.bytecode.iter().flat_map(|op| op.render()).collect()
+        let mut bytecode: Vec<u8> = self.bytecode.iter().flat_map(|op| op.render()).collect();
+        bytecode.push(0x00);
+        bytecode
     }
 
     /// Generates the init code shared by CREATE and CREATE2: spawns a fresh
@@ -693,6 +695,25 @@ mod tests {
         assert_eq!(machine.nonces.get(&caller), Some(&1));
         assert_eq!(machine.nonces.get(&code_addr), Some(&2));
         assert_eq!(machine.nonces.get(&created), Some(&1));
+    }
+
+    #[test]
+    fn bytecode_always_appends_terminal_stop() {
+        let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
+
+        machine.ingest(Opcode::Push1([0xAA])).unwrap();
+
+        assert_eq!(machine.bytecode(), vec![0x60, 0xAA, 0x00]);
+    }
+
+    #[test]
+    fn render_init_code_keeps_return_tail_without_export_stop() {
+        let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
+        machine.ingest(Opcode::Push1([0xAA])).unwrap();
+
+        let init_code = Machine::render_init_code(&machine).unwrap();
+
+        assert_eq!(init_code, vec![0x60, 0xAA, 0x60, 0x00, 0x60, 0x00, 0xF3]);
     }
 
     #[test]

@@ -328,6 +328,7 @@ fn write_bug_testcase(workdir: &Path, bytecode: &[u8], ctx: &WorkerContext) -> R
 struct OkResult {
     state_root: String,
     logs_hash: String,
+    stack_witness: String,
 }
 
 #[derive(Debug)]
@@ -378,9 +379,90 @@ fn parse_ok_payload(payload: &str) -> OkResult {
     let mut lines = payload.lines();
     let state_root = lines.next().unwrap_or("").trim().to_string();
     let logs_hash = lines.next().unwrap_or("").trim().to_string();
+    let stack_witness = lines.next().unwrap_or("[]").trim().to_string();
     OkResult {
         state_root,
         logs_hash,
+        stack_witness,
+    }
+}
+
+fn failure_summary(err: &str) -> String {
+    err.lines().next().unwrap_or("").chars().take(200).collect()
+}
+
+fn pairwise_disagreements(servers: &[ClientServer; 3], results: &[ClientResult; 3]) -> Vec<String> {
+    let mut disagreements = Vec::new();
+    for i in 0..results.len() {
+        for j in (i + 1)..results.len() {
+            let left_name = servers[i].kind.name();
+            let right_name = servers[j].kind.name();
+            match (&results[i], &results[j]) {
+                (ClientResult::Ok(left), ClientResult::Ok(right)) => {
+                    let mut dimensions = Vec::with_capacity(3);
+                    if left.state_root != right.state_root {
+                        dimensions.push("STATE ROOT");
+                    }
+                    if left.logs_hash != right.logs_hash {
+                        dimensions.push("LOGS HASH");
+                    }
+                    if left.stack_witness != right.stack_witness {
+                        dimensions.push("STACK");
+                    }
+                    if !dimensions.is_empty() {
+                        disagreements.push(format!(
+                            "{left_name} != {right_name} on {}",
+                            dimensions.join(", ")
+                        ));
+                    }
+                }
+                (ClientResult::Fail(left_err), ClientResult::Fail(right_err)) => {
+                    let left_summary = failure_summary(left_err);
+                    let right_summary = failure_summary(right_err);
+                    if left_summary != right_summary {
+                        disagreements
+                            .push(format!("{left_name} != {right_name} on FAILURE REASON"));
+                    }
+                }
+                (ClientResult::Ok(_), ClientResult::Fail(_))
+                | (ClientResult::Fail(_), ClientResult::Ok(_)) => {
+                    disagreements.push(format!(
+                        "{left_name} != {right_name} on STATUS (OK vs FAIL)"
+                    ));
+                }
+            }
+        }
+    }
+    disagreements
+}
+
+fn append_differing_stacks(
+    output: &mut String,
+    servers: &[ClientServer; 3],
+    results: &[ClientResult; 3],
+) {
+    let mut groups: Vec<(String, Vec<&'static str>)> = Vec::new();
+    for (server, result) in servers.iter().zip(results.iter()) {
+        let ClientResult::Ok(ok) = result else {
+            continue;
+        };
+        if let Some((_, names)) = groups
+            .iter_mut()
+            .find(|(stack_witness, _)| *stack_witness == ok.stack_witness)
+        {
+            names.push(server.kind.name());
+        } else {
+            groups.push((ok.stack_witness.clone(), vec![server.kind.name()]));
+        }
+    }
+
+    if groups.len() <= 1 {
+        return;
+    }
+
+    output.push_str("  differing stacks:\n");
+    for (stack_witness, names) in groups {
+        output.push_str(&format!("    [{}]: {}\n", names.join(", "), stack_witness));
     }
 }
 
@@ -391,8 +473,8 @@ fn run_one(
     sender_sk: &[u8; 32],
     gas: u32,
     timeout: Duration,
-    worker_id: usize,
-    iter: u64,
+    _worker_id: usize,
+    _iter: u64,
 ) -> Result<RunOneOutput> {
     let json_val = build_state_test_json(bytecode, sender, sender_sk, gas);
     let json_bytes = serde_json::to_vec(&json_val)?;
@@ -409,7 +491,7 @@ fn run_one(
     }
 
     let mut done: [Option<ClientResult>; 3] = [None, None, None];
-    let mut output = String::new();
+    let output = String::new();
     loop {
         let mut all_done = true;
         for (i, srv) in servers.iter_mut().enumerate() {
@@ -428,14 +510,7 @@ fn run_one(
             }
             match srv.read_signal().as_str() {
                 "OK" => match srv.read_data() {
-                    Ok(payload) => {
-                        output.push_str(&format!(
-                            "worker {worker_id} iter {iter} {}\n{}\n",
-                            srv.kind.name(),
-                            payload
-                        ));
-                        done[i] = Some(ClientResult::Ok(parse_ok_payload(&payload)))
-                    }
+                    Ok(payload) => done[i] = Some(ClientResult::Ok(parse_ok_payload(&payload))),
                     Err(e) => {
                         done[i] = Some(ClientResult::Fail(format!("(failed to read result: {e})")))
                     }
@@ -539,17 +614,22 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
         for (i, r) in results.iter().enumerate() {
             let name = servers[i].kind.name();
             match r {
-                ClientResult::Ok(ok) => output.push_str(&format!(
-                    "  {name}: OK state={} logs={}\n",
-                    ok.state_root, ok.logs_hash
-                )),
+                ClientResult::Ok(ok) => {
+                    output.push_str(&format!(
+                        "  {name}: OK state={} logs={}\n",
+                        ok.state_root, ok.logs_hash
+                    ));
+                }
                 ClientResult::Fail(err) => {
-                    let one_line: String =
-                        err.lines().next().unwrap_or("").chars().take(200).collect();
+                    let one_line = failure_summary(err);
                     output.push_str(&format!("  {name}: FAIL {one_line}\n"));
                 }
             }
         }
+        for disagreement in pairwise_disagreements(servers, &results) {
+            output.push_str(&format!("  disagree: {disagreement}\n"));
+        }
+        append_differing_stacks(&mut output, servers, &results);
         output.push_str(&format!("  testcase: {}\n", bug_path.display()));
         output.push_str(&format!("  bytecode: {}\n", hex0x(&bytecode)));
         print_locked(&ctx.shared, &output);
@@ -562,7 +642,8 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
         let first = oks[0];
         let state_match = oks.iter().all(|o| o.state_root == first.state_root);
         let logs_match = oks.iter().all(|o| o.logs_hash == first.logs_hash);
-        if state_match && logs_match {
+        let stack_match = oks.iter().all(|o| o.stack_witness == first.stack_witness);
+        if state_match && logs_match && stack_match {
             if iter % 100 == 0 {
                 output.push_str(&format!(
                     "worker {} iter {iter} (seed {machine_seed}): OK state={} logs={}\n",
@@ -572,13 +653,17 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
         } else {
             ctx.shared.mismatches.fetch_add(1, Ordering::Relaxed);
             let bug_path = write_bug_testcase(&servers[0].workdir, &bytecode, ctx)?;
-            let kind = if !state_match && !logs_match {
-                "STATE+LOGS MISMATCH"
-            } else if !state_match {
-                "STATE ROOT MISMATCH"
-            } else {
-                "LOGS HASH MISMATCH"
-            };
+            let mut mismatched_dimensions = Vec::with_capacity(3);
+            if !state_match {
+                mismatched_dimensions.push("STATE ROOT");
+            }
+            if !logs_match {
+                mismatched_dimensions.push("LOGS HASH");
+            }
+            if !stack_match {
+                mismatched_dimensions.push("STACK");
+            }
+            let kind = format!("{} MISMATCH", mismatched_dimensions.join("+"));
             output.push_str(&format!(
                 "worker {} iter {iter} (seed {machine_seed}): {kind}\n",
                 ctx.id
@@ -591,6 +676,10 @@ fn run_iteration(ctx: &WorkerContext, servers: &mut [ClientServer; 3], iter: u64
                     ok.logs_hash
                 ));
             }
+            for disagreement in pairwise_disagreements(servers, &results) {
+                output.push_str(&format!("  disagree: {disagreement}\n"));
+            }
+            append_differing_stacks(&mut output, servers, &results);
             output.push_str(&format!("  testcase: {}\n", bug_path.display()));
             output.push_str(&format!("  bytecode: {}\n", hex0x(&bytecode)));
             print_locked(&ctx.shared, &output);
