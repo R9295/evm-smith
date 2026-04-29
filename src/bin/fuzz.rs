@@ -22,11 +22,6 @@ use evm::{
     opcodes::Opcode, state_test::{build_state_test_json, hex0x},
 };
 
-/// Standard EEST test sender private key. Address: 0xa94f5374fce5edbc8e2a8697c15331677e6ebf0b.
-const DEFAULT_SENDER_SK: [u8; 32] = [
-    0x45, 0xa9, 0x15, 0xe4, 0xd0, 0x60, 0x14, 0x9e, 0xb4, 0x36, 0x59, 0x60, 0xe6, 0xa7, 0xa4, 0x5f,
-    0x33, 0x43, 0x93, 0x09, 0x30, 0x61, 0x11, 0x6b, 0x19, 0x7e, 0x32, 0x40, 0x06, 0x5f, 0xf2, 0xd8,
-];
 
 const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 10;
 const POLL_INTERVAL: Duration = Duration::from_micros(100);
@@ -241,16 +236,6 @@ fn create_core_workdir(core_id: usize) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn derive_sender(sk: &[u8; 32]) -> Result<Address> {
-    let secp = secp256k1::Secp256k1::new();
-    let secret = secp256k1::SecretKey::from_byte_array(sk)
-        .map_err(|e| anyhow!("invalid sender secret key: {e}"))?;
-    let pk = secp256k1::PublicKey::from_secret_key(&secp, &secret);
-    let serialized = pk.serialize_uncompressed();
-    // serialize_uncompressed returns 65 bytes: leading 0x04 tag + 64 bytes of x||y.
-    let hash = keccak256(&serialized[1..]);
-    Ok(Address::from_slice(&hash[12..]))
-}
 
 fn write_bug_testcase(workdir: &Path, bytecode: &[u8], ctx: &WorkerContext) -> Result<PathBuf> {
     let json_val = build_state_test_json(bytecode, ctx.sender, &ctx.sender_sk, ctx.cli.gas);
