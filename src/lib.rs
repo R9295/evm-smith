@@ -2,9 +2,9 @@
 
 #[cfg(not(any(feature = "rng", feature = "arbitrary")))]
 compile_error!("enable at least one generation feature: `rng` or `arbitrary`");
-pub mod state_test;
 pub mod addresses;
 mod error;
+pub mod state_test;
 pub use error::Error;
 pub mod machine;
 pub mod opcodes;

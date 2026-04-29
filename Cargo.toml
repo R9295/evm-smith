@@ -3,6 +3,9 @@ name = "evm"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [[bin]]
 name = "fuzz"
 path = "src/bin/fuzz.rs"

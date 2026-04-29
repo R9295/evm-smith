@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use alloy_primitives::{Address, keccak256};
+use alloy_primitives::Address;
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Parser;
 use std::{
@@ -18,10 +18,10 @@ use std::{
 
 use evm::{
     addresses::ExecutionAddresses,
-    machine::{Config, Machine, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT},
-    opcodes::Opcode, state_test::{build_state_test_json, hex0x},
+    machine::{Config, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT, Machine},
+    opcodes::Opcode,
+    state_test::{DEFAULT_SENDER_SK, build_state_test_json, derive_sender, hex0x},
 };
-
 
 const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 10;
 const POLL_INTERVAL: Duration = Duration::from_micros(100);
@@ -236,9 +236,8 @@ fn create_core_workdir(core_id: usize) -> Result<PathBuf> {
     Ok(path)
 }
 
-
 fn write_bug_testcase(workdir: &Path, bytecode: &[u8], ctx: &WorkerContext) -> Result<PathBuf> {
-    let json_val = build_state_test_json(bytecode, ctx.sender, &ctx.sender_sk, ctx.cli.gas);
+    let json_val = build_state_test_json(bytecode, ctx.sender, &ctx.sender_sk, ctx.cli.gas as u64);
     let json_bytes = serde_json::to_vec_pretty(&json_val)?;
     let path = workdir.join("bug.json");
     atomic_write(&path, &json_bytes)?;
@@ -397,7 +396,7 @@ fn run_one(
     _worker_id: usize,
     _iter: u64,
 ) -> Result<RunOneOutput> {
-    let json_val = build_state_test_json(bytecode, sender, sender_sk, gas);
+    let json_val = build_state_test_json(bytecode, sender, sender_sk, gas as u64);
     let json_bytes = serde_json::to_vec(&json_val)?;
 
     for srv in servers.iter() {

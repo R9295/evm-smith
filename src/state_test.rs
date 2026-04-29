@@ -1,11 +1,104 @@
-use alloy_primitives::{keccak256, Address};
-use serde_json::{json, Value};
+use alloy_primitives::{Address, keccak256};
+use serde_json::{Value, json};
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct EvmByteBuffer {
+    pub data: *mut u8,
+    pub len: usize,
+}
+
+impl EvmByteBuffer {
+    fn null() -> Self {
+        Self {
+            data: std::ptr::null_mut(),
+            len: 0,
+        }
+    }
+
+    fn from_vec(bytes: Vec<u8>) -> Self {
+        let mut bytes = bytes.into_boxed_slice();
+        let out = Self {
+            data: bytes.as_mut_ptr(),
+            len: bytes.len(),
+        };
+        std::mem::forget(bytes);
+        out
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+pub fn arbitrary_state_test(data: Vec<u8>, gas: u64) -> Vec<u8> {
+    use arbitrary::Unstructured;
+
+    use crate::{
+        addresses::ExecutionAddresses,
+        machine::{Config, Machine},
+        opcodes::Opcode,
+    };
+
+    let sender_sk = DEFAULT_SENDER_SK;
+    let sender = derive_sender(&sender_sk).unwrap();
+    let mut config = Config::default();
+    config.addresses = ExecutionAddresses {
+        caller: sender,
+        contract: ExecutionAddresses::default().contract,
+    };
+    let mut machine = Machine::new_arbitrary(gas, data.clone(), config.clone());
+    let mut opcode_data = Unstructured::new(&data);
+    while let Ok(opcode) = Opcode::arbitrary_with_memory_limits(
+        &mut opcode_data,
+        config.memory_offset_limit,
+        config.memory_length_limit,
+    ) {
+        if !machine.ingest(opcode).is_ok() {
+            break;
+        }
+    }
+    let st = build_state_test_json(&machine.bytecode(), sender, &sender_sk, gas);
+    serde_json::to_vec(&st).unwrap()
+}
+
+#[cfg(feature = "arbitrary")]
+#[unsafe(export_name = "arbitrary_state_test")]
+pub unsafe extern "C" fn arbitrary_state_test_ffi(
+    data: *const u8,
+    len: usize,
+    gas: u64,
+) -> EvmByteBuffer {
+    if data.is_null() && len != 0 {
+        return EvmByteBuffer::null();
+    }
+
+    let input = if len == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(data, len) }.to_vec()
+    };
+
+    std::panic::catch_unwind(|| EvmByteBuffer::from_vec(arbitrary_state_test(input, gas)))
+        .unwrap_or_else(|_| EvmByteBuffer::null())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn evm_byte_buffer_free(buffer: EvmByteBuffer) {
+    if buffer.data.is_null() {
+        return;
+    }
+
+    unsafe {
+        drop(Box::from_raw(std::ptr::slice_from_raw_parts_mut(
+            buffer.data,
+            buffer.len,
+        )));
+    }
+}
 
 pub fn build_state_test_json(
     bytecode: &[u8],
     sender: Address,
     sender_sk: &[u8; 32],
-    _gas: u32,
+    _gas: u64,
 ) -> Value {
     let gas_limit = 167_77_216u32;
     json!({
@@ -56,7 +149,6 @@ pub fn build_state_test_json(
     })
 }
 
-
 const FORK: &str = "Osaka";
 
 pub fn hex0x(bytes: &[u8]) -> String {
@@ -84,3 +176,30 @@ pub const DEFAULT_SENDER_SK: [u8; 32] = [
     0x45, 0xa9, 0x15, 0xe4, 0xd0, 0x60, 0x14, 0x9e, 0xb4, 0x36, 0x59, 0x60, 0xe6, 0xa7, 0xa4, 0x5f,
     0x33, 0x43, 0x93, 0x09, 0x30, 0x61, 0x11, 0x6b, 0x19, 0x7e, 0x32, 0x40, 0x06, 0x5f, 0xf2, 0xd8,
 ];
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ffi_arbitrary_state_test_returns_owned_json() {
+        let input = [0xAA, 0xBB, 0xCC, 0xDD];
+        let buffer = unsafe { arbitrary_state_test_ffi(input.as_ptr(), input.len(), 100_000) };
+
+        assert!(!buffer.data.is_null());
+        assert!(buffer.len > 0);
+
+        let bytes = unsafe { std::slice::from_raw_parts(buffer.data, buffer.len) };
+        assert_eq!(bytes[0], b'{');
+
+        unsafe { evm_byte_buffer_free(buffer) };
+    }
+
+    #[test]
+    fn ffi_arbitrary_state_test_rejects_null_nonempty_input() {
+        let buffer = unsafe { arbitrary_state_test_ffi(std::ptr::null(), 1, 100_000) };
+
+        assert!(buffer.data.is_null());
+        assert_eq!(buffer.len, 0);
+    }
+}
