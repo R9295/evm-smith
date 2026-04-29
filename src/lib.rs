@@ -5,6 +5,8 @@ mod error;
 pub mod machine;
 pub mod opcodes;
 mod runner;
+#[cfg(feature = "arbitrary")]
+pub mod arbitrary;
 
 #[cfg(test)]
 mod test {

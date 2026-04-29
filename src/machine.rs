@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::{
     addresses::ExecutionAddresses,
     error::Error,
-    opcodes::{Opcode, Resource},
+    opcodes::{Opcode, Requires, Provides, Resource},
 };
 
 pub const DEFAULT_MEMORY_OFFSET_LIMIT: u64 = u16::MAX as u64;

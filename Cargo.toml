@@ -10,8 +10,13 @@ path = "src/bin/fuzz.rs"
 [dependencies]
 alloy-primitives = "1.5.7"
 anyhow = "1.0.102"
+arbitrary = { version = "1.4.2", optional =  true, features = ["derive"]}
 clap = { version = "4", features = ["derive"] }
-fastrand = "2.4.1"
+fastrand = {version = "2.4.1" }
 revm = "38"
 secp256k1 = "0.30"
 serde_json = "1"
+
+[features]
+arbitrary = ["dep:arbitrary"]
+# random = ["dep:fastrand"]
