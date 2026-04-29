@@ -1,14 +1,17 @@
 #![allow(dead_code)]
 
+#[cfg(not(any(feature = "rng", feature = "arbitrary")))]
+compile_error!("enable at least one generation feature: `rng` or `arbitrary`");
+
 pub mod addresses;
+#[cfg(feature = "rng")]
 mod error;
+#[cfg(feature = "rng")]
 pub mod machine;
 pub mod opcodes;
 mod runner;
-#[cfg(feature = "arbitrary")]
-pub mod arbitrary;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rng"))]
 mod test {
     use crate::{
         machine::Machine,

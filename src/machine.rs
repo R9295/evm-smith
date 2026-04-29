@@ -5,11 +5,10 @@ use std::collections::HashMap;
 use crate::{
     addresses::ExecutionAddresses,
     error::Error,
-    opcodes::{Opcode, Requires, Provides, Resource},
+    opcodes::{Opcode, Provides, Requires, Resource},
 };
 
-pub const DEFAULT_MEMORY_OFFSET_LIMIT: u64 = u16::MAX as u64;
-pub const DEFAULT_MEMORY_LENGTH_LIMIT: u64 = u8::MAX as u64;
+pub use crate::opcodes::{DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT};
 
 /// Tunables for the symbolic generator.
 #[derive(Debug, Clone)]

@@ -8,9 +8,13 @@ pub mod provides;
 pub use provides::*;
 
 use alloy_primitives::{Address, U256};
+#[cfg(feature = "rng")]
 use fastrand::Rng;
+#[cfg(feature = "rng")]
+use std::convert::Infallible;
 
-use crate::machine::{DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT};
+pub const DEFAULT_MEMORY_OFFSET_LIMIT: u64 = u16::MAX as u64;
+pub const DEFAULT_MEMORY_LENGTH_LIMIT: u64 = u8::MAX as u64;
 
 #[derive(Debug, Clone)]
 pub enum Opcode {
@@ -271,41 +275,6 @@ fn memory_range_size(offset: u64, length: u64) -> u64 {
     }
 }
 
-fn random_inclusive_u64(rng: &mut Rng, limit: u64) -> u64 {
-    if limit == u64::MAX {
-        rng.u64(..)
-    } else {
-        rng.u64(..limit + 1)
-    }
-}
-
-fn random_memory_offset(rng: &mut Rng, memory_offset_limit: u64) -> u64 {
-    random_inclusive_u64(rng, memory_offset_limit)
-}
-
-fn random_memory_length(rng: &mut Rng, memory_length_limit: u64) -> u64 {
-    random_inclusive_u64(rng, memory_length_limit)
-}
-
-/// Random `(offset, length)` for ops that touch a memory range. Both limits are
-/// configurable to bound memory expansion gas and per-byte charges.
-fn random_memory_range(
-    rng: &mut Rng,
-    memory_offset_limit: u64,
-    memory_length_limit: u64,
-) -> (u64, u64) {
-    (
-        random_memory_offset(rng, memory_offset_limit),
-        random_memory_length(rng, memory_length_limit),
-    )
-}
-
-fn random_topic(rng: &mut Rng) -> U256 {
-    let mut bytes = [0u8; 32];
-    rng.fill(&mut bytes);
-    U256::from_be_bytes(bytes)
-}
-
 /// Round `bytes` up to the next 32-byte word boundary.
 pub fn round_up_to_word(bytes: u64) -> u64 {
     (bytes.saturating_add(31) / 32).saturating_mul(32)
@@ -331,17 +300,90 @@ pub fn copy_memory_size_two(dest: u64, src: u64, length: u64) -> u64 {
     }
 }
 
-fn random_copy_range(
-    rng: &mut Rng,
+trait OpcodeSource {
+    type Error;
+
+    fn bytes<const N: usize>(&mut self) -> Result<[u8; N], Self::Error>;
+    fn u8(&mut self) -> Result<u8, Self::Error>;
+    fn u64_inclusive(&mut self, limit: u64) -> Result<u64, Self::Error>;
+}
+
+#[cfg(feature = "rng")]
+struct RngOpcodeSource<'a>(&'a mut Rng);
+
+#[cfg(feature = "rng")]
+impl OpcodeSource for RngOpcodeSource<'_> {
+    type Error = Infallible;
+
+    fn bytes<const N: usize>(&mut self) -> Result<[u8; N], Self::Error> {
+        let mut bytes = [0u8; N];
+        self.0.fill(&mut bytes);
+        Ok(bytes)
+    }
+
+    fn u8(&mut self) -> Result<u8, Self::Error> {
+        Ok(self.0.u8(..))
+    }
+
+    fn u64_inclusive(&mut self, limit: u64) -> Result<u64, Self::Error> {
+        if limit == u64::MAX {
+            Ok(self.0.u64(..))
+        } else {
+            Ok(self.0.u64(..limit + 1))
+        }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+struct ArbitraryOpcodeSource<'a, 'b>(&'a mut Unstructured<'b>);
+
+#[cfg(feature = "arbitrary")]
+impl OpcodeSource for ArbitraryOpcodeSource<'_, '_> {
+    type Error = arbitrary::Error;
+
+    fn bytes<const N: usize>(&mut self) -> Result<[u8; N], Self::Error> {
+        <[u8; N]>::arbitrary(self.0)
+    }
+
+    fn u8(&mut self) -> Result<u8, Self::Error> {
+        u8::arbitrary(self.0)
+    }
+
+    fn u64_inclusive(&mut self, limit: u64) -> Result<u64, Self::Error> {
+        self.0.int_in_range(0..=limit)
+    }
+}
+
+fn generated_topic<S: OpcodeSource>(source: &mut S) -> Result<U256, S::Error> {
+    Ok(U256::from_be_bytes(source.bytes::<32>()?))
+}
+
+fn generated_memory_range<S: OpcodeSource>(
+    source: &mut S,
     memory_offset_limit: u64,
     memory_length_limit: u64,
-) -> (u64, u64, u64) {
-    (
-        random_memory_offset(rng, memory_offset_limit),
-        random_memory_offset(rng, memory_offset_limit),
-        random_memory_length(rng, memory_length_limit),
-    )
+) -> Result<(u64, u64), S::Error> {
+    Ok((
+        source.u64_inclusive(memory_offset_limit)?,
+        source.u64_inclusive(memory_length_limit)?,
+    ))
 }
+
+fn generated_copy_range<S: OpcodeSource>(
+    source: &mut S,
+    memory_offset_limit: u64,
+    memory_length_limit: u64,
+) -> Result<(u64, u64, u64), S::Error> {
+    Ok((
+        source.u64_inclusive(memory_offset_limit)?,
+        source.u64_inclusive(memory_offset_limit)?,
+        source.u64_inclusive(memory_length_limit)?,
+    ))
+}
+
+const GENERATED_VARIANT_COUNT: usize = 140;
+const PUSH_VARIANT_OFFSET: usize = 56;
+const PUSH_VARIANT_COUNT: usize = 32;
 
 impl Opcode {
     /// Returns true for opcodes that halt the current execution frame on
@@ -357,6 +399,7 @@ impl Opcode {
     /// variants the immediate-byte array is filled with random bytes from
     /// `rng`. Terminating ops that need explicit placement (`STOP`,
     /// `RETURN`, `SELFDESTRUCT`) are excluded.
+    #[cfg(feature = "rng")]
     pub fn generate(rng: &mut Rng) -> Opcode {
         Self::generate_with_memory_limits(
             rng,
@@ -367,6 +410,7 @@ impl Opcode {
 
     /// Returns a uniformly-random generated `Opcode` variant, sampling memory
     /// offsets from `0..=memory_offset_limit`.
+    #[cfg(feature = "rng")]
     pub fn generate_with_memory_offset_limit(rng: &mut Rng, memory_offset_limit: u64) -> Opcode {
         Self::generate_with_memory_limits(rng, memory_offset_limit, DEFAULT_MEMORY_LENGTH_LIMIT)
     }
@@ -374,427 +418,97 @@ impl Opcode {
     /// Returns a uniformly-random generated `Opcode` variant, sampling memory
     /// offsets from `0..=memory_offset_limit` and memory lengths from
     /// `0..=memory_length_limit`.
+    #[cfg(feature = "rng")]
     pub fn generate_with_memory_limits(
         rng: &mut Rng,
         memory_offset_limit: u64,
         memory_length_limit: u64,
     ) -> Opcode {
-        const VARIANT_COUNT: usize = 140;
-        Self::nth_variant(
-            rng.usize(0..VARIANT_COUNT),
-            rng,
-            memory_offset_limit,
-            memory_length_limit,
-        )
+        let idx = rng.usize(0..GENERATED_VARIANT_COUNT);
+        Self::nth_variant_rng(idx, rng, memory_offset_limit, memory_length_limit)
     }
 
     /// Returns a uniformly-random `Push*` variant with random immediate bytes.
-    /// (Picks among Push1..Push32; Push0 is excluded.)
+    /// Picks among Push1..Push32; Push0 is excluded.
+    #[cfg(feature = "rng")]
     pub fn generate_push(rng: &mut Rng) -> Opcode {
-        const PUSH_OFFSET: usize = 56;
-        const PUSH_COUNT: usize = 32;
-        Self::nth_variant(
-            PUSH_OFFSET + rng.usize(0..PUSH_COUNT),
+        let idx = PUSH_VARIANT_OFFSET + rng.usize(0..PUSH_VARIANT_COUNT);
+        Self::nth_variant_rng(
+            idx,
             rng,
             DEFAULT_MEMORY_OFFSET_LIMIT,
             DEFAULT_MEMORY_LENGTH_LIMIT,
         )
     }
+
+    /// Returns an `Opcode` variant generated from arbitrary input bytes.
+    /// Terminating ops that need explicit placement (`STOP`, `RETURN`,
+    /// `SELFDESTRUCT`) are excluded.
     #[cfg(feature = "arbitrary")]
-    fn nth_variant<'a>(
-        idx: usize,
-        data: &'a mut Unstructured,
+    pub fn arbitrary_with_memory_limits(
+        u: &mut Unstructured<'_>,
         memory_offset_limit: u64,
         memory_length_limit: u64,
-    ) -> Opcode {
-        match idx {
-            0 => Opcode::Add,
-            1 => Opcode::Mul,
-            2 => Opcode::Sub,
-            3 => Opcode::Div,
-            4 => Opcode::SDiv,
-            5 => Opcode::Mod,
-            6 => Opcode::SMod,
-            7 => Opcode::AddMod,
-            8 => Opcode::MulMod,
-            9 => Opcode::Exp,
-            10 => Opcode::SignExtend,
-            11 => Opcode::Lt,
-            12 => Opcode::Gt,
-            13 => Opcode::Slt,
-            14 => Opcode::Sgt,
-            15 => Opcode::Eq,
-            16 => Opcode::IsZero,
-            17 => Opcode::And,
-            18 => Opcode::Or,
-            19 => Opcode::Xor,
-            20 => Opcode::Not,
-            21 => Opcode::Byte,
-            22 => Opcode::Shl,
-            23 => Opcode::Shr,
-            24 => Opcode::Sar,
-            25 => Opcode::Address,
-            26 => Opcode::Balance,
-            27 => Opcode::Origin,
-            28 => Opcode::Caller,
-            29 => Opcode::CallValue,
-            30 => Opcode::CallDataSize,
-            31 => Opcode::CodeSize,
-            32 => Opcode::GasPrice,
-            33 => Opcode::ExtCodeSize,
-            34 => Opcode::ReturnDataSize,
-            35 => Opcode::ExtCodeHash,
-            36 => Opcode::BlockHash,
-            37 => Opcode::CoinBase,
-            38 => Opcode::TimeStamp,
-            39 => Opcode::Number,
-            40 => Opcode::PrevRandao,
-            41 => Opcode::GasLimit,
-            42 => Opcode::ChainId,
-            43 => Opcode::SelfBalance,
-            44 => Opcode::BaseFee,
-            45 => Opcode::BlobHash,
-            46 => Opcode::BlobBaseFee,
-            47 => Opcode::Pop,
-            48 => Opcode::SLoad,
-            49 => Opcode::SStore,
-            50 => Opcode::Pc,
-            51 => Opcode::MSize,
-            52 => Opcode::Gas,
-            53 => Opcode::TLoad,
-            54 => Opcode::TStore,
-            55 => Opcode::Push0,
-            56 => {
-                let b = <[u8; 1]>::arbitrary(&mut u).unwrap();
-                Opcode::Push1(b)
-            }
-            57 => {
-                let b = <[u8; 2]>::arbitrary(&mut u).unwrap();
-                Opcode::Push2(b)
-            }
-            58 => {
-                let b = <[u8; 3]>::arbitrary(&mut u).unwrap();
-                Opcode::Push3(b)
-            }
-            59 => {
-                let mut b = [0u8; 4];
-                rng.fill(&mut b);
-                Opcode::Push4(b)
-            }
-            60 => {
-                let mut b = [0u8; 5];
-                rng.fill(&mut b);
-                Opcode::Push5(b)
-            }
-            61 => {
-                let mut b = [0u8; 6];
-                rng.fill(&mut b);
-                Opcode::Push6(b)
-            }
-            62 => {
-                let mut b = [0u8; 7];
-                rng.fill(&mut b);
-                Opcode::Push7(b)
-            }
-            63 => {
-                let mut b = [0u8; 8];
-                rng.fill(&mut b);
-                Opcode::Push8(b)
-            }
-            64 => {
-                let mut b = [0u8; 9];
-                rng.fill(&mut b);
-                Opcode::Push9(b)
-            }
-            65 => {
-                let mut b = [0u8; 10];
-                rng.fill(&mut b);
-                Opcode::Push10(b)
-            }
-            66 => {
-                let mut b = [0u8; 11];
-                rng.fill(&mut b);
-                Opcode::Push11(b)
-            }
-            67 => {
-                let mut b = [0u8; 12];
-                rng.fill(&mut b);
-                Opcode::Push12(b)
-            }
-            68 => {
-                let mut b = [0u8; 13];
-                rng.fill(&mut b);
-                Opcode::Push13(b)
-            }
-            69 => {
-                let mut b = [0u8; 14];
-                rng.fill(&mut b);
-                Opcode::Push14(b)
-            }
-            70 => {
-                let mut b = [0u8; 15];
-                rng.fill(&mut b);
-                Opcode::Push15(b)
-            }
-            71 => {
-                let mut b = [0u8; 16];
-                rng.fill(&mut b);
-                Opcode::Push16(b)
-            }
-            72 => {
-                let mut b = [0u8; 17];
-                rng.fill(&mut b);
-                Opcode::Push17(b)
-            }
-            73 => {
-                let mut b = [0u8; 18];
-                rng.fill(&mut b);
-                Opcode::Push18(b)
-            }
-            74 => {
-                let mut b = [0u8; 19];
-                rng.fill(&mut b);
-                Opcode::Push19(b)
-            }
-            75 => {
-                let mut b = [0u8; 20];
-                rng.fill(&mut b);
-                Opcode::Push20(b)
-            }
-            76 => {
-                let mut b = [0u8; 21];
-                rng.fill(&mut b);
-                Opcode::Push21(b)
-            }
-            77 => {
-                let mut b = [0u8; 22];
-                rng.fill(&mut b);
-                Opcode::Push22(b)
-            }
-            78 => {
-                let mut b = [0u8; 23];
-                rng.fill(&mut b);
-                Opcode::Push23(b)
-            }
-            79 => {
-                let mut b = [0u8; 24];
-                rng.fill(&mut b);
-                Opcode::Push24(b)
-            }
-            80 => {
-                let mut b = [0u8; 25];
-                rng.fill(&mut b);
-                Opcode::Push25(b)
-            }
-            81 => {
-                let mut b = [0u8; 26];
-                rng.fill(&mut b);
-                Opcode::Push26(b)
-            }
-            82 => {
-                let mut b = [0u8; 27];
-                rng.fill(&mut b);
-                Opcode::Push27(b)
-            }
-            83 => {
-                let mut b = [0u8; 28];
-                rng.fill(&mut b);
-                Opcode::Push28(b)
-            }
-            84 => {
-                let mut b = [0u8; 29];
-                rng.fill(&mut b);
-                Opcode::Push29(b)
-            }
-            85 => {
-                let mut b = [0u8; 30];
-                rng.fill(&mut b);
-                Opcode::Push30(b)
-            }
-            86 => {
-                let mut b = [0u8; 31];
-                rng.fill(&mut b);
-                Opcode::Push31(b)
-            }
-            87 => {
-                let mut b = [0u8; 32];
-                rng.fill(&mut b);
-                Opcode::Push32(b)
-            }
-            88 => Opcode::Dup1,
-            89 => Opcode::Dup2,
-            90 => Opcode::Dup3,
-            91 => Opcode::Dup4,
-            92 => Opcode::Dup5,
-            93 => Opcode::Dup6,
-            94 => Opcode::Dup7,
-            95 => Opcode::Dup8,
-            96 => Opcode::Dup9,
-            97 => Opcode::Dup10,
-            98 => Opcode::Dup11,
-            99 => Opcode::Dup12,
-            100 => Opcode::Dup13,
-            101 => Opcode::Dup14,
-            102 => Opcode::Dup15,
-            103 => Opcode::Dup16,
-            104 => Opcode::Swap1,
-            105 => Opcode::Swap2,
-            106 => Opcode::Swap3,
-            107 => Opcode::Swap4,
-            108 => Opcode::Swap5,
-            109 => Opcode::Swap6,
-            110 => Opcode::Swap7,
-            111 => Opcode::Swap8,
-            112 => Opcode::Swap9,
-            113 => Opcode::Swap10,
-            114 => Opcode::Swap11,
-            115 => Opcode::Swap12,
-            116 => Opcode::Swap13,
-            117 => Opcode::Swap14,
-            118 => Opcode::Swap15,
-            119 => Opcode::Swap16,
-            120 => {
-                let offset = random_memory_offset(rng, memory_offset_limit);
-                let mut value_bytes = [0u8; 32];
-                rng.fill(&mut value_bytes);
-                Opcode::MStore(offset, U256::from_be_bytes(value_bytes))
-            }
-            121 => {
-                let offset = random_memory_offset(rng, memory_offset_limit);
-                Opcode::MLoad(offset)
-            }
-            122 => {
-                let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Log0(offset, length)
-            }
-            123 => {
-                let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Log1(offset, length, random_topic(rng))
-            }
-            124 => {
-                let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Log2(offset, length, random_topic(rng), random_topic(rng))
-            }
-            125 => {
-                let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Log3(
-                    offset,
-                    length,
-                    random_topic(rng),
-                    random_topic(rng),
-                    random_topic(rng),
-                )
-            }
-            126 => {
-                let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Log4(
-                    offset,
-                    length,
-                    random_topic(rng),
-                    random_topic(rng),
-                    random_topic(rng),
-                    random_topic(rng),
-                )
-            }
-            127 => Opcode::MStore8(random_memory_offset(rng, memory_offset_limit), rng.u8(..)),
-            128 => {
-                let (dest, src, length) =
-                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::MCopy(dest, src, length)
-            }
-            129 => {
-                let (dest, src, length) =
-                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::CallDataCopy(dest, src, length)
-            }
-            130 => {
-                let (dest, src, length) =
-                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::CodeCopy(dest, src, length)
-            }
-            131 => {
-                let (dest, src, length) =
-                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::ExtCodeCopy(random_topic(rng), dest, src, length)
-            }
-            132 => Opcode::CallDataLoad(random_memory_offset(rng, memory_offset_limit)),
-            133 => {
-                let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Keccak256(offset, length)
-            }
-            // Placeholder. Real init code is materialized by `Machine::ingest`
-            // (which has access to outer gas + RNG) the first time this is
-            // ingested; subsequent ingestions of the same value would re-use
-            // the populated payload.
-            134 => Opcode::Create(Vec::new()),
-            // CREATE2 placeholder; salt is sampled now (it does not depend on
-            // outer machine state), init code is materialized lazily.
-            135 => Opcode::Create2(Vec::new(), random_topic(rng)),
-            // CALL placeholder. Memory ranges are sampled now; gas and target
-            // address are filled in by `Machine::ingest` (they depend on outer
-            // state). The placeholder is detected by `address == Address::ZERO`.
-            136 => {
-                let (args_offset, args_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                let (ret_offset, ret_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Call {
-                    gas: 0,
-                    address: Address::ZERO,
-                    args_offset,
-                    args_size,
-                    ret_offset,
-                    ret_size,
-                }
-            }
-            // STATICCALL / DELEGATECALL placeholders. Same materialization
-            // rules as CALL.
-            137 => {
-                let (args_offset, args_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                let (ret_offset, ret_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::StaticCall {
-                    gas: 0,
-                    address: Address::ZERO,
-                    args_offset,
-                    args_size,
-                    ret_offset,
-                    ret_size,
-                }
-            }
-            138 => {
-                let (args_offset, args_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                let (ret_offset, ret_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::DelegateCall {
-                    gas: 0,
-                    address: Address::ZERO,
-                    args_offset,
-                    args_size,
-                    ret_offset,
-                    ret_size,
-                }
-            }
-            139 => Opcode::Clz,
-            _ => unreachable!("nth_variant: idx {} out of range", idx),
-        }
+    ) -> arbitrary::Result<Opcode> {
+        let idx = u.int_in_range(0..=GENERATED_VARIANT_COUNT - 1)?;
+        Self::nth_variant_arbitrary(idx, u, memory_offset_limit, memory_length_limit)
     }
-    #[cfg(not(feature = "arbitrary"))]
-    fn nth_variant(
+
+    /// Returns an `Opcode` variant generated from arbitrary input bytes,
+    /// sampling memory offsets from `0..=memory_offset_limit`.
+    #[cfg(feature = "arbitrary")]
+    pub fn arbitrary_with_memory_offset_limit(
+        u: &mut Unstructured<'_>,
+        memory_offset_limit: u64,
+    ) -> arbitrary::Result<Opcode> {
+        Self::arbitrary_with_memory_limits(u, memory_offset_limit, DEFAULT_MEMORY_LENGTH_LIMIT)
+    }
+
+    /// Returns a `Push*` variant generated from arbitrary input bytes.
+    /// Picks among Push1..Push32; Push0 is excluded.
+    #[cfg(feature = "arbitrary")]
+    pub fn arbitrary_push(u: &mut Unstructured<'_>) -> arbitrary::Result<Opcode> {
+        let idx = PUSH_VARIANT_OFFSET + u.int_in_range(0..=PUSH_VARIANT_COUNT - 1)?;
+        Self::nth_variant_arbitrary(
+            idx,
+            u,
+            DEFAULT_MEMORY_OFFSET_LIMIT,
+            DEFAULT_MEMORY_LENGTH_LIMIT,
+        )
+    }
+
+    #[cfg(feature = "rng")]
+    fn nth_variant_rng(
         idx: usize,
         rng: &mut Rng,
         memory_offset_limit: u64,
         memory_length_limit: u64,
     ) -> Opcode {
-        match idx {
+        let mut source = RngOpcodeSource(rng);
+        match Self::nth_variant_from(idx, &mut source, memory_offset_limit, memory_length_limit) {
+            Ok(op) => op,
+            Err(err) => match err {},
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    fn nth_variant_arbitrary(
+        idx: usize,
+        u: &mut Unstructured<'_>,
+        memory_offset_limit: u64,
+        memory_length_limit: u64,
+    ) -> arbitrary::Result<Opcode> {
+        let mut source = ArbitraryOpcodeSource(u);
+        Self::nth_variant_from(idx, &mut source, memory_offset_limit, memory_length_limit)
+    }
+
+    fn nth_variant_from<S: OpcodeSource>(
+        idx: usize,
+        source: &mut S,
+        memory_offset_limit: u64,
+        memory_length_limit: u64,
+    ) -> Result<Opcode, S::Error> {
+        Ok(match idx {
             0 => Opcode::Add,
             1 => Opcode::Mul,
             2 => Opcode::Sub,
@@ -851,166 +565,38 @@ impl Opcode {
             53 => Opcode::TLoad,
             54 => Opcode::TStore,
             55 => Opcode::Push0,
-            56 => {
-                let mut b = [0u8; 1];
-                rng.fill(&mut b);
-                Opcode::Push1(b)
-            }
-            57 => {
-                let mut b = [0u8; 2];
-                rng.fill(&mut b);
-                Opcode::Push2(b)
-            }
-            58 => {
-                let mut b = [0u8; 3];
-                rng.fill(&mut b);
-                Opcode::Push3(b)
-            }
-            59 => {
-                let mut b = [0u8; 4];
-                rng.fill(&mut b);
-                Opcode::Push4(b)
-            }
-            60 => {
-                let mut b = [0u8; 5];
-                rng.fill(&mut b);
-                Opcode::Push5(b)
-            }
-            61 => {
-                let mut b = [0u8; 6];
-                rng.fill(&mut b);
-                Opcode::Push6(b)
-            }
-            62 => {
-                let mut b = [0u8; 7];
-                rng.fill(&mut b);
-                Opcode::Push7(b)
-            }
-            63 => {
-                let mut b = [0u8; 8];
-                rng.fill(&mut b);
-                Opcode::Push8(b)
-            }
-            64 => {
-                let mut b = [0u8; 9];
-                rng.fill(&mut b);
-                Opcode::Push9(b)
-            }
-            65 => {
-                let mut b = [0u8; 10];
-                rng.fill(&mut b);
-                Opcode::Push10(b)
-            }
-            66 => {
-                let mut b = [0u8; 11];
-                rng.fill(&mut b);
-                Opcode::Push11(b)
-            }
-            67 => {
-                let mut b = [0u8; 12];
-                rng.fill(&mut b);
-                Opcode::Push12(b)
-            }
-            68 => {
-                let mut b = [0u8; 13];
-                rng.fill(&mut b);
-                Opcode::Push13(b)
-            }
-            69 => {
-                let mut b = [0u8; 14];
-                rng.fill(&mut b);
-                Opcode::Push14(b)
-            }
-            70 => {
-                let mut b = [0u8; 15];
-                rng.fill(&mut b);
-                Opcode::Push15(b)
-            }
-            71 => {
-                let mut b = [0u8; 16];
-                rng.fill(&mut b);
-                Opcode::Push16(b)
-            }
-            72 => {
-                let mut b = [0u8; 17];
-                rng.fill(&mut b);
-                Opcode::Push17(b)
-            }
-            73 => {
-                let mut b = [0u8; 18];
-                rng.fill(&mut b);
-                Opcode::Push18(b)
-            }
-            74 => {
-                let mut b = [0u8; 19];
-                rng.fill(&mut b);
-                Opcode::Push19(b)
-            }
-            75 => {
-                let mut b = [0u8; 20];
-                rng.fill(&mut b);
-                Opcode::Push20(b)
-            }
-            76 => {
-                let mut b = [0u8; 21];
-                rng.fill(&mut b);
-                Opcode::Push21(b)
-            }
-            77 => {
-                let mut b = [0u8; 22];
-                rng.fill(&mut b);
-                Opcode::Push22(b)
-            }
-            78 => {
-                let mut b = [0u8; 23];
-                rng.fill(&mut b);
-                Opcode::Push23(b)
-            }
-            79 => {
-                let mut b = [0u8; 24];
-                rng.fill(&mut b);
-                Opcode::Push24(b)
-            }
-            80 => {
-                let mut b = [0u8; 25];
-                rng.fill(&mut b);
-                Opcode::Push25(b)
-            }
-            81 => {
-                let mut b = [0u8; 26];
-                rng.fill(&mut b);
-                Opcode::Push26(b)
-            }
-            82 => {
-                let mut b = [0u8; 27];
-                rng.fill(&mut b);
-                Opcode::Push27(b)
-            }
-            83 => {
-                let mut b = [0u8; 28];
-                rng.fill(&mut b);
-                Opcode::Push28(b)
-            }
-            84 => {
-                let mut b = [0u8; 29];
-                rng.fill(&mut b);
-                Opcode::Push29(b)
-            }
-            85 => {
-                let mut b = [0u8; 30];
-                rng.fill(&mut b);
-                Opcode::Push30(b)
-            }
-            86 => {
-                let mut b = [0u8; 31];
-                rng.fill(&mut b);
-                Opcode::Push31(b)
-            }
-            87 => {
-                let mut b = [0u8; 32];
-                rng.fill(&mut b);
-                Opcode::Push32(b)
-            }
+            56 => Opcode::Push1(source.bytes()?),
+            57 => Opcode::Push2(source.bytes()?),
+            58 => Opcode::Push3(source.bytes()?),
+            59 => Opcode::Push4(source.bytes()?),
+            60 => Opcode::Push5(source.bytes()?),
+            61 => Opcode::Push6(source.bytes()?),
+            62 => Opcode::Push7(source.bytes()?),
+            63 => Opcode::Push8(source.bytes()?),
+            64 => Opcode::Push9(source.bytes()?),
+            65 => Opcode::Push10(source.bytes()?),
+            66 => Opcode::Push11(source.bytes()?),
+            67 => Opcode::Push12(source.bytes()?),
+            68 => Opcode::Push13(source.bytes()?),
+            69 => Opcode::Push14(source.bytes()?),
+            70 => Opcode::Push15(source.bytes()?),
+            71 => Opcode::Push16(source.bytes()?),
+            72 => Opcode::Push17(source.bytes()?),
+            73 => Opcode::Push18(source.bytes()?),
+            74 => Opcode::Push19(source.bytes()?),
+            75 => Opcode::Push20(source.bytes()?),
+            76 => Opcode::Push21(source.bytes()?),
+            77 => Opcode::Push22(source.bytes()?),
+            78 => Opcode::Push23(source.bytes()?),
+            79 => Opcode::Push24(source.bytes()?),
+            80 => Opcode::Push25(source.bytes()?),
+            81 => Opcode::Push26(source.bytes()?),
+            82 => Opcode::Push27(source.bytes()?),
+            83 => Opcode::Push28(source.bytes()?),
+            84 => Opcode::Push29(source.bytes()?),
+            85 => Opcode::Push30(source.bytes()?),
+            86 => Opcode::Push31(source.bytes()?),
+            87 => Opcode::Push32(source.bytes()?),
             88 => Opcode::Dup1,
             89 => Opcode::Dup2,
             90 => Opcode::Dup3,
@@ -1044,96 +630,88 @@ impl Opcode {
             118 => Opcode::Swap15,
             119 => Opcode::Swap16,
             120 => {
-                let offset = random_memory_offset(rng, memory_offset_limit);
-                let mut value_bytes = [0u8; 32];
-                rng.fill(&mut value_bytes);
-                Opcode::MStore(offset, U256::from_be_bytes(value_bytes))
+                let offset = source.u64_inclusive(memory_offset_limit)?;
+                let value = U256::from_be_bytes(source.bytes::<32>()?);
+                Opcode::MStore(offset, value)
             }
-            121 => {
-                let offset = random_memory_offset(rng, memory_offset_limit);
-                Opcode::MLoad(offset)
-            }
+            121 => Opcode::MLoad(source.u64_inclusive(memory_offset_limit)?),
             122 => {
                 let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::Log0(offset, length)
             }
             123 => {
                 let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Log1(offset, length, random_topic(rng))
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                Opcode::Log1(offset, length, generated_topic(source)?)
             }
             124 => {
                 let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::Log2(offset, length, random_topic(rng), random_topic(rng))
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                Opcode::Log2(
+                    offset,
+                    length,
+                    generated_topic(source)?,
+                    generated_topic(source)?,
+                )
             }
             125 => {
                 let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::Log3(
                     offset,
                     length,
-                    random_topic(rng),
-                    random_topic(rng),
-                    random_topic(rng),
+                    generated_topic(source)?,
+                    generated_topic(source)?,
+                    generated_topic(source)?,
                 )
             }
             126 => {
                 let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::Log4(
                     offset,
                     length,
-                    random_topic(rng),
-                    random_topic(rng),
-                    random_topic(rng),
-                    random_topic(rng),
+                    generated_topic(source)?,
+                    generated_topic(source)?,
+                    generated_topic(source)?,
+                    generated_topic(source)?,
                 )
             }
-            127 => Opcode::MStore8(random_memory_offset(rng, memory_offset_limit), rng.u8(..)),
+            127 => Opcode::MStore8(source.u64_inclusive(memory_offset_limit)?, source.u8()?),
             128 => {
                 let (dest, src, length) =
-                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_copy_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::MCopy(dest, src, length)
             }
             129 => {
                 let (dest, src, length) =
-                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_copy_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::CallDataCopy(dest, src, length)
             }
             130 => {
                 let (dest, src, length) =
-                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_copy_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::CodeCopy(dest, src, length)
             }
             131 => {
                 let (dest, src, length) =
-                    random_copy_range(rng, memory_offset_limit, memory_length_limit);
-                Opcode::ExtCodeCopy(random_topic(rng), dest, src, length)
+                    generated_copy_range(source, memory_offset_limit, memory_length_limit)?;
+                Opcode::ExtCodeCopy(generated_topic(source)?, dest, src, length)
             }
-            132 => Opcode::CallDataLoad(random_memory_offset(rng, memory_offset_limit)),
+            132 => Opcode::CallDataLoad(source.u64_inclusive(memory_offset_limit)?),
             133 => {
                 let (offset, length) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::Keccak256(offset, length)
             }
-            // Placeholder. Real init code is materialized by `Machine::ingest`
-            // (which has access to outer gas + RNG) the first time this is
-            // ingested; subsequent ingestions of the same value would re-use
-            // the populated payload.
             134 => Opcode::Create(Vec::new()),
-            // CREATE2 placeholder; salt is sampled now (it does not depend on
-            // outer machine state), init code is materialized lazily.
-            135 => Opcode::Create2(Vec::new(), random_topic(rng)),
-            // CALL placeholder. Memory ranges are sampled now; gas and target
-            // address are filled in by `Machine::ingest` (they depend on outer
-            // state). The placeholder is detected by `address == Address::ZERO`.
+            135 => Opcode::Create2(Vec::new(), generated_topic(source)?),
             136 => {
                 let (args_offset, args_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 let (ret_offset, ret_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::Call {
                     gas: 0,
                     address: Address::ZERO,
@@ -1143,13 +721,11 @@ impl Opcode {
                     ret_size,
                 }
             }
-            // STATICCALL / DELEGATECALL placeholders. Same materialization
-            // rules as CALL.
             137 => {
                 let (args_offset, args_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 let (ret_offset, ret_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::StaticCall {
                     gas: 0,
                     address: Address::ZERO,
@@ -1161,9 +737,9 @@ impl Opcode {
             }
             138 => {
                 let (args_offset, args_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 let (ret_offset, ret_size) =
-                    random_memory_range(rng, memory_offset_limit, memory_length_limit);
+                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
                 Opcode::DelegateCall {
                     gas: 0,
                     address: Address::ZERO,
@@ -1175,7 +751,7 @@ impl Opcode {
             }
             139 => Opcode::Clz,
             _ => unreachable!("nth_variant: idx {} out of range", idx),
-        }
+        })
     }
 
     pub fn render(&self) -> Vec<u8> {
@@ -1592,28 +1168,66 @@ fn render_push(opcode: u8, immediate: &[u8]) -> Vec<u8> {
     v
 }
 
+#[cfg(feature = "arbitrary")]
+impl<'a> Arbitrary<'a> for Opcode {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Self::arbitrary_with_memory_limits(
+            u,
+            DEFAULT_MEMORY_OFFSET_LIMIT,
+            DEFAULT_MEMORY_LENGTH_LIMIT,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn configured_zero_memory_limits_force_zero_offsets_and_lengths() {
-        let memory_variant_indices = [
-            120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 136, 137, 138,
-        ];
+    const MEMORY_VARIANT_INDICES: [usize; 17] = [
+        120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 136, 137, 138,
+    ];
 
-        for idx in memory_variant_indices {
+    #[cfg(feature = "rng")]
+    #[test]
+    fn rng_zero_memory_limits_force_zero_offsets_and_lengths() {
+        for idx in MEMORY_VARIANT_INDICES {
             let mut rng = Rng::with_seed(idx as u64);
-            let op = Opcode::nth_variant(idx, &mut rng, 0, 0);
+            let op = Opcode::nth_variant_rng(idx, &mut rng, 0, 0);
             assert_memory_offsets_and_lengths(&op, 0, 0);
         }
     }
 
+    #[cfg(feature = "arbitrary")]
     #[test]
-    fn generated_variants_exclude_manual_terminators() {
+    fn arbitrary_zero_memory_limits_force_zero_offsets_and_lengths() {
+        let data = [0xAB; 512];
+        for idx in MEMORY_VARIANT_INDICES {
+            let mut u = Unstructured::new(&data);
+            let op = Opcode::nth_variant_arbitrary(idx, &mut u, 0, 0).unwrap();
+            assert_memory_offsets_and_lengths(&op, 0, 0);
+        }
+    }
+
+    #[cfg(feature = "rng")]
+    #[test]
+    fn rng_variants_exclude_manual_terminators() {
         let mut rng = Rng::with_seed(0);
-        for idx in 0..140 {
-            let op = Opcode::nth_variant(idx, &mut rng, 0, 0);
+        for idx in 0..GENERATED_VARIANT_COUNT {
+            let op = Opcode::nth_variant_rng(idx, &mut rng, 0, 0);
+            assert!(!matches!(
+                op,
+                Opcode::Stop | Opcode::Return(..) | Opcode::SelfDestruct(..)
+            ));
+        }
+    }
+
+    #[cfg(feature = "arbitrary")]
+    #[test]
+    fn arbitrary_variants_exclude_manual_terminators() {
+        let data = [0xCD; 512];
+        for idx in 0..GENERATED_VARIANT_COUNT {
+            let mut u = Unstructured::new(&data);
+            let op = Opcode::nth_variant_arbitrary(idx, &mut u, 0, 0).unwrap();
             assert!(!matches!(
                 op,
                 Opcode::Stop | Opcode::Return(..) | Opcode::SelfDestruct(..)

@@ -159,7 +159,7 @@ fn account_nonce(db: &CacheDB<EmptyDB>, address: Address) -> u64 {
         .unwrap_or(0)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rng"))]
 mod tests {
     use super::*;
     use crate::addresses::ExecutionAddresses;
