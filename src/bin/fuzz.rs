@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use alloy_primitives::{Address, keccak256};
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Parser;
@@ -15,7 +17,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use crate::{
+use evm::{
     addresses::ExecutionAddresses,
     machine::{Config, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT, Machine},
     opcodes::Opcode,
@@ -286,7 +288,7 @@ fn build_state_test_json(
                     // 1 ETH + u128::MAX, matching runner.rs:88.
                     "balance": "0x1000000000000000000ffffffffffffffff",
                     "code": "0x",
-                    "nonce": "0x00",
+                    "nonce": "0x01",
                     "storage": {},
                 },
                 "0x4242424242424242424242424242424242424242": {
@@ -300,7 +302,7 @@ fn build_state_test_json(
                 "data": ["0x"],
                 "gasLimit": [format!("{:#x}", gas_limit)],
                 "gasPrice": "0x0a",
-                "nonce": "0x00",
+                "nonce": "0x01",
                 "secretKey": hex0x(sender_sk),
                 "to": "0x4242424242424242424242424242424242424242",
                 "value": ["0xde0b6b3a7640000"],
@@ -809,4 +811,9 @@ pub fn run(cli: Cli) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    run(cli)
 }

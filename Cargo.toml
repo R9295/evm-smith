@@ -3,6 +3,10 @@ name = "evm"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "fuzz"
+path = "src/bin/fuzz.rs"
+
 [dependencies]
 alloy-primitives = "1.5.7"
 anyhow = "1.0.102"
