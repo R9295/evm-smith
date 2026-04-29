@@ -1,10 +1,13 @@
 use alloy_primitives::{Address, U256, keccak256};
+#[cfg(feature = "arbitrary")]
+use arbitrary::Unstructured;
+#[cfg(feature = "rng")]
 use fastrand::Rng;
 use std::collections::HashMap;
 
 use crate::{
+    Error,
     addresses::ExecutionAddresses,
-    error::Error,
     opcodes::{Opcode, Provides, Requires, Resource},
 };
 
@@ -50,10 +53,166 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug)]
-pub struct Machine {
-    config: Config,
+pub trait MachineSource: Clone {
+    fn pick_index(&mut self, len: usize) -> anyhow::Result<usize, Error>;
+    fn next_opcode(
+        &mut self,
+        memory_offset_limit: u64,
+        memory_length_limit: u64,
+    ) -> anyhow::Result<Opcode, Error>;
+    fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error>;
+    fn fork(&mut self) -> anyhow::Result<(Self, Self), Error>;
+}
+
+#[cfg(feature = "arbitrary")]
+pub type DefaultMachineSource = ArbitraryMachineSource;
+#[cfg(all(not(feature = "arbitrary"), feature = "rng"))]
+pub type DefaultMachineSource = RngMachineSource;
+#[cfg(not(any(feature = "rng", feature = "arbitrary")))]
+pub type DefaultMachineSource = MissingMachineSource;
+
+#[cfg(feature = "rng")]
+#[derive(Debug, Clone)]
+pub struct RngMachineSource {
     rng: Rng,
+}
+
+#[cfg(feature = "rng")]
+impl RngMachineSource {
+    pub fn new(rng: Rng) -> Self {
+        Self { rng }
+    }
+}
+
+#[cfg(feature = "rng")]
+impl MachineSource for RngMachineSource {
+    fn pick_index(&mut self, len: usize) -> anyhow::Result<usize, Error> {
+        Ok(self.rng.usize(0..len))
+    }
+
+    fn next_opcode(
+        &mut self,
+        memory_offset_limit: u64,
+        memory_length_limit: u64,
+    ) -> anyhow::Result<Opcode, Error> {
+        Ok(Opcode::generate_with_memory_limits(
+            &mut self.rng,
+            memory_offset_limit,
+            memory_length_limit,
+        ))
+    }
+
+    fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error> {
+        Ok(Opcode::generate_push(&mut self.rng))
+    }
+
+    fn fork(&mut self) -> anyhow::Result<(Self, Self), Error> {
+        let gen_seed = self.rng.u64(..);
+        let machine_seed = self.rng.u64(..);
+        Ok((
+            Self::new(Rng::with_seed(gen_seed)),
+            Self::new(Rng::with_seed(machine_seed)),
+        ))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+#[derive(Debug, Clone, Default)]
+pub struct ArbitraryMachineSource {
+    data: Vec<u8>,
+    cursor: usize,
+}
+
+#[cfg(feature = "arbitrary")]
+impl ArbitraryMachineSource {
+    pub fn new(data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            data: data.into(),
+            cursor: 0,
+        }
+    }
+
+    fn with_unstructured<T>(
+        &mut self,
+        f: impl FnOnce(&mut Unstructured<'_>) -> arbitrary::Result<T>,
+    ) -> anyhow::Result<T, Error> {
+        let before = self.data.len().saturating_sub(self.cursor);
+        let result;
+        let consumed;
+        {
+            let mut u = Unstructured::new(&self.data[self.cursor..]);
+            result = f(&mut u);
+            consumed = before.saturating_sub(u.len());
+        }
+        self.cursor = self.cursor.saturating_add(consumed);
+        result.map_err(|_| Error::InputExhausted)
+    }
+
+    fn child_source(&mut self) -> anyhow::Result<Self, Error> {
+        let data = self.with_unstructured(|u| {
+            let len = u.arbitrary_len::<u8>()?;
+            Ok(u.bytes(len)?.to_vec())
+        })?;
+        Ok(Self::new(data))
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl MachineSource for ArbitraryMachineSource {
+    fn pick_index(&mut self, len: usize) -> anyhow::Result<usize, Error> {
+        self.with_unstructured(|u| u.choose_index(len))
+    }
+
+    fn next_opcode(
+        &mut self,
+        memory_offset_limit: u64,
+        memory_length_limit: u64,
+    ) -> anyhow::Result<Opcode, Error> {
+        self.with_unstructured(|u| {
+            Opcode::arbitrary_with_memory_limits(u, memory_offset_limit, memory_length_limit)
+        })
+    }
+
+    fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error> {
+        self.with_unstructured(Opcode::arbitrary_push)
+    }
+
+    fn fork(&mut self) -> anyhow::Result<(Self, Self), Error> {
+        Ok((self.child_source()?, self.child_source()?))
+    }
+}
+
+#[cfg(not(any(feature = "rng", feature = "arbitrary")))]
+#[derive(Debug, Clone)]
+pub struct MissingMachineSource;
+
+#[cfg(not(any(feature = "rng", feature = "arbitrary")))]
+impl MachineSource for MissingMachineSource {
+    fn pick_index(&mut self, _len: usize) -> anyhow::Result<usize, Error> {
+        unreachable!("enable either the `rng` or `arbitrary` feature")
+    }
+
+    fn next_opcode(
+        &mut self,
+        _memory_offset_limit: u64,
+        _memory_length_limit: u64,
+    ) -> anyhow::Result<Opcode, Error> {
+        unreachable!("enable either the `rng` or `arbitrary` feature")
+    }
+
+    fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error> {
+        unreachable!("enable either the `rng` or `arbitrary` feature")
+    }
+
+    fn fork(&mut self) -> anyhow::Result<(Self, Self), Error> {
+        unreachable!("enable either the `rng` or `arbitrary` feature")
+    }
+}
+
+#[derive(Debug)]
+pub struct Machine<S: MachineSource = DefaultMachineSource> {
+    config: Config,
+    source: S,
     gas: u64,
     stack: Vec<U256>,
     address_stack: Vec<Address>,
@@ -78,16 +237,49 @@ struct CreatedContractState {
     nonce: u64,
 }
 
-impl Machine {
+impl Machine<DefaultMachineSource> {
+    #[cfg(feature = "arbitrary")]
+    pub fn new(gas: u64, data: impl Into<Vec<u8>>, config: Config) -> Self {
+        Self::from_source(gas, ArbitraryMachineSource::new(data), config)
+    }
+
+    #[cfg(all(not(feature = "arbitrary"), feature = "rng"))]
     pub fn new(gas: u64, rng: Rng, config: Config) -> Self {
+        Self::from_source(gas, RngMachineSource::new(rng), config)
+    }
+}
+
+#[cfg(feature = "rng")]
+impl Machine<RngMachineSource> {
+    pub fn new_rng(gas: u64, rng: Rng, config: Config) -> Self {
+        Self::from_source(gas, RngMachineSource::new(rng), config)
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl Machine<ArbitraryMachineSource> {
+    pub fn new_arbitrary(gas: u64, data: impl Into<Vec<u8>>, config: Config) -> Self {
+        Self::from_source(gas, ArbitraryMachineSource::new(data), config)
+    }
+}
+
+impl<S: MachineSource> Machine<S> {
+    fn from_source(gas: u64, source: S, config: Config) -> Self {
         config.addresses.assert_valid();
         let caller = config.addresses.caller;
         let current_address = config.addresses.contract;
         // Root: the only safe initial CALL target is `caller` (a pre-funded
         // EOA with no code). `current_address` is the test contract — it has
         // code, so excluded.
-        let mut machine =
-            Self::with_context(gas, rng, config, current_address, caller, 1, vec![caller]);
+        let mut machine = Self::with_context(
+            gas,
+            source,
+            config,
+            current_address,
+            caller,
+            1,
+            vec![caller],
+        );
         // Match EVM transaction execution semantics: the tx sender's nonce is
         // bumped before any bytecode runs.
         machine.bump_nonce(caller);
@@ -96,7 +288,7 @@ impl Machine {
 
     fn with_context(
         gas: u64,
-        rng: Rng,
+        source: S,
         config: Config,
         current_address: Address,
         caller: Address,
@@ -108,7 +300,7 @@ impl Machine {
         Self {
             config,
             gas,
-            rng,
+            source,
             memory: 0,
             stack: vec![],
             address_stack: vec![current_address],
@@ -181,9 +373,9 @@ impl Machine {
         *nonce = nonce.checked_add(1).expect("nonce overflow");
     }
 
-    fn pick_callable_address(&mut self) -> Address {
-        let idx = self.rng.usize(0..self.callable_addresses.len());
-        self.callable_addresses[idx]
+    fn pick_callable_address(&mut self) -> anyhow::Result<Address, Error> {
+        let idx = self.source.pick_index(self.callable_addresses.len())?;
+        Ok(self.callable_addresses[idx])
     }
 
     fn record_created_contract(
@@ -238,11 +430,11 @@ impl Machine {
     fn build_generated_submachine(
         &self,
         sub_budget: u64,
-        gen_seed: u64,
-        machine_seed: u64,
+        mut gen_source: S,
+        machine_source: S,
         current_address: Address,
         caller: Address,
-    ) -> Self {
+    ) -> anyhow::Result<Self, Error> {
         let mut sub_config = self.config.clone();
         sub_config.allow_termination = false;
         sub_config.grow_callable_on_create = false;
@@ -253,30 +445,34 @@ impl Machine {
         // and the rendered bytecode must be identical across both — otherwise
         // the keccak-derived create2 address diverges from runtime. The
         // parent's set already contains only safe (empty-code) targets.
-        let mut sub_machine = Machine::with_context(
+        let mut sub_machine = Self::with_context(
             sub_budget,
-            Rng::with_seed(machine_seed),
+            machine_source,
             sub_config,
             current_address,
             caller,
             1,
             self.callable_addresses.clone(),
         );
-        let mut gen_rng = Rng::with_seed(gen_seed);
         loop {
-            let inner = Opcode::generate_with_memory_limits(
-                &mut gen_rng,
+            let inner = match gen_source.next_opcode(
                 sub_machine.config.memory_offset_limit,
                 sub_machine.config.memory_length_limit,
-            );
+            ) {
+                Ok(inner) => inner,
+                Err(Error::InputExhausted) => break,
+                Err(err) => return Err(err),
+            };
             if sub_machine.ingest(inner).is_err() {
                 break;
             }
         }
-        sub_machine
+        Ok(sub_machine)
     }
 
-    fn render_init_code(sub_machine: &Machine) -> anyhow::Result<Vec<u8>, Error> {
+    fn render_init_code<T: MachineSource>(
+        sub_machine: &Machine<T>,
+    ) -> anyhow::Result<Vec<u8>, Error> {
         // EIP-3860 caps init code at 49152 bytes; reserve 5 bytes for the
         // appended RETURN(0, 0) tail (PUSH1 0, PUSH1 0, RETURN).
         const MAX_INIT_CODE: usize = 49152 - 5;
@@ -304,7 +500,7 @@ impl Machine {
         }
         // Materialize placeholder CREATE/CREATE2 ops (empty payloads from
         // `Opcode::generate`) now that we have access to the outer machine's
-        // gas budget and RNG.
+        // gas budget and generation source.
         let (op, pending_created_state) = match op {
             Opcode::Create(ref payload) if payload.is_empty() => {
                 let creator = self.current_address();
@@ -343,7 +539,7 @@ impl Machine {
                 ..
             } if address == Address::ZERO => {
                 let materialized_gas = self.gas / 4;
-                let target = self.pick_callable_address();
+                let target = self.pick_callable_address()?;
                 (
                     Opcode::Call {
                         gas: materialized_gas,
@@ -365,7 +561,7 @@ impl Machine {
                 ..
             } if address == Address::ZERO => {
                 let materialized_gas = self.gas / 4;
-                let target = self.pick_callable_address();
+                let target = self.pick_callable_address()?;
                 (
                     Opcode::StaticCall {
                         gas: materialized_gas,
@@ -387,7 +583,7 @@ impl Machine {
                 ..
             } if address == Address::ZERO => {
                 let materialized_gas = self.gas / 4;
-                let target = self.pick_callable_address();
+                let target = self.pick_callable_address()?;
                 (
                     Opcode::DelegateCall {
                         gas: materialized_gas,
@@ -451,7 +647,7 @@ impl Machine {
             }
             // Proceed to solve constraints before we resolve the op.
             if constraints.stack() > 0 {
-                stack.insert(0, Opcode::generate_push(&mut self.rng));
+                stack.insert(0, self.source.push_opcode()?);
             }
             if constraints.stack() < 0 {
                 stack.insert(0, Opcode::Pop);
@@ -494,18 +690,17 @@ impl Machine {
         current_address: Address,
     ) -> anyhow::Result<GeneratedInitCode, Error> {
         let sub_budget = self.create_sub_budget();
-        // Fork two independent RNGs from the outer's so the sub-machine's
+        // Fork two independent sources from the outer's so the sub-machine's
         // internal constraint solver and the inner generator don't share state.
-        let gen_seed = self.rng.u64(..);
-        let machine_seed = self.rng.u64(..);
+        let (gen_source, machine_source) = self.source.fork()?;
         let creator = self.current_address();
         let sub_machine = self.build_generated_submachine(
             sub_budget,
-            gen_seed,
-            machine_seed,
+            gen_source,
+            machine_source,
             current_address,
             creator,
-        );
+        )?;
         let init_code = Self::render_init_code(&sub_machine)?;
         Ok(GeneratedInitCode {
             address: current_address,
@@ -520,26 +715,25 @@ impl Machine {
         salt: U256,
     ) -> anyhow::Result<GeneratedInitCode, Error> {
         let sub_budget = self.create_sub_budget();
-        let gen_seed = self.rng.u64(..);
-        let machine_seed = self.rng.u64(..);
+        let (gen_source, machine_source) = self.source.fork()?;
 
         let probe_machine = self.build_generated_submachine(
             sub_budget,
-            gen_seed,
-            machine_seed,
+            gen_source.clone(),
+            machine_source.clone(),
             Address::ZERO,
             creator,
-        );
+        )?;
         let probe_code = Self::render_init_code(&probe_machine)?;
         let created_address = creator.create2_from_code(salt.to_be_bytes::<32>(), &probe_code);
 
         let final_machine = self.build_generated_submachine(
             sub_budget,
-            gen_seed,
-            machine_seed,
+            gen_source,
+            machine_source,
             created_address,
             creator,
-        );
+        )?;
         let final_code = Self::render_init_code(&final_machine)?;
         debug_assert_eq!(probe_code, final_code);
 
@@ -627,7 +821,7 @@ fn rlp_encode_nonce(nonce: u64) -> Vec<u8> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "rng"))]
 mod tests {
     use super::*;
 
@@ -635,7 +829,7 @@ mod tests {
     fn new_machine_initializes_caller_state() {
         let addresses = ExecutionAddresses::default();
         let caller = addresses.caller;
-        let machine = Machine::new(1, Rng::with_seed(7), Config::default());
+        let machine = Machine::new_rng(1, Rng::with_seed(7), Config::default());
 
         assert_eq!(machine.call_stack, vec![caller]);
         assert_eq!(machine.nonces.get(&caller), Some(&1));
@@ -651,7 +845,7 @@ mod tests {
             addresses,
             ..Config::default()
         };
-        let machine = Machine::new(1, Rng::with_seed(7), config);
+        let machine = Machine::new_rng(1, Rng::with_seed(7), config);
 
         assert_eq!(machine.call_stack, vec![addresses.caller]);
         assert_eq!(machine.address_stack, vec![addresses.contract]);
@@ -666,7 +860,7 @@ mod tests {
         let caller = addresses.caller;
         let code_addr = addresses.contract;
         let created = create_address(code_addr, 1);
-        let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
+        let mut machine = Machine::new_rng(100_000, Rng::with_seed(7), Config::default());
 
         assert!(
             machine
@@ -687,7 +881,7 @@ mod tests {
         let init_code = vec![0x60, 0x00, 0x60, 0x00, 0xF3];
         let salt = U256::from(0x1234_u64);
         let created = code_addr.create2_from_code(salt.to_be_bytes::<32>(), &init_code);
-        let mut machine = Machine::new(100_000, Rng::with_seed(11), Config::default());
+        let mut machine = Machine::new_rng(100_000, Rng::with_seed(11), Config::default());
 
         assert!(machine.ingest(Opcode::Create2(init_code, salt)).is_ok());
 
@@ -698,7 +892,7 @@ mod tests {
 
     #[test]
     fn bytecode_always_appends_terminal_stop() {
-        let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
+        let mut machine = Machine::new_rng(100_000, Rng::with_seed(7), Config::default());
 
         machine.ingest(Opcode::Push1([0xAA])).unwrap();
 
@@ -707,17 +901,17 @@ mod tests {
 
     #[test]
     fn render_init_code_keeps_return_tail_without_export_stop() {
-        let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
+        let mut machine = Machine::new_rng(100_000, Rng::with_seed(7), Config::default());
         machine.ingest(Opcode::Push1([0xAA])).unwrap();
 
-        let init_code = Machine::render_init_code(&machine).unwrap();
+        let init_code = Machine::<RngMachineSource>::render_init_code(&machine).unwrap();
 
         assert_eq!(init_code, vec![0x60, 0xAA, 0x60, 0x00, 0x60, 0x00, 0xF3]);
     }
 
     #[test]
     fn oversized_init_code_returns_max_init_code() {
-        let mut machine = Machine::new(10_000_000, Rng::with_seed(13), Config::default());
+        let mut machine = Machine::new_rng(10_000_000, Rng::with_seed(13), Config::default());
         let oversized = vec![0u8; 49_153];
 
         let err = machine.ingest(Opcode::Create(oversized)).unwrap_err();
@@ -747,7 +941,7 @@ mod tests {
         let make_sub = |current_address: Address| {
             Machine::with_context(
                 10_000_000,
-                Rng::with_seed(0),
+                RngMachineSource::new(Rng::with_seed(0)),
                 config.clone(),
                 current_address,
                 caller,
@@ -820,7 +1014,7 @@ mod tests {
         let make_sub = |current_address: Address| {
             Machine::with_context(
                 10_000_000,
-                Rng::with_seed(0),
+                RngMachineSource::new(Rng::with_seed(0)),
                 config.clone(),
                 current_address,
                 caller,
@@ -847,5 +1041,41 @@ mod tests {
         let probe_nested_nonce = probe.nonce_of(Address::ZERO);
         let final_nested_nonce = finalised.nonce_of(Address::from([0x42; 20]));
         assert_eq!(probe_nested_nonce, final_nested_nonce);
+    }
+}
+
+#[cfg(all(test, feature = "arbitrary"))]
+mod arbitrary_tests {
+    use super::*;
+
+    #[test]
+    fn new_machine_accepts_arbitrary_input_when_feature_is_enabled() {
+        let mut machine = Machine::new(100_000, vec![0xAA, 0xBB], Config::default());
+
+        machine.ingest(Opcode::Push1([0xCC])).unwrap();
+
+        assert_eq!(machine.bytecode(), vec![0x60, 0xCC, 0x00]);
+    }
+
+    #[test]
+    fn arbitrary_machine_materializes_placeholder_call() {
+        let mut machine = Machine::new_arbitrary(100_000, Vec::new(), Config::default());
+
+        machine
+            .ingest(Opcode::Call {
+                gas: 0,
+                address: Address::ZERO,
+                args_offset: 0,
+                args_size: 0,
+                ret_offset: 0,
+                ret_size: 0,
+            })
+            .unwrap();
+
+        let Opcode::Call { gas, address, .. } = &machine.bytecode_ops()[0] else {
+            panic!("placeholder call should materialize into a call");
+        };
+        assert_eq!(*gas, 25_000);
+        assert_eq!(*address, Config::default().addresses.caller);
     }
 }

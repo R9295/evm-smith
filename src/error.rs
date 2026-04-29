@@ -3,4 +3,5 @@ pub enum Error {
     OutOfGas,
     MaxInitCode,
     HaltConditionEncountered,
+    InputExhausted,
 }

@@ -552,7 +552,7 @@ fn run_one(
 
 fn generate_bytecode(iter: u64, seed: u64, gas: u32, config: &Config) -> Vec<u8> {
     let machine_seed = seed.wrapping_add(iter);
-    let mut machine = Machine::new(
+    let mut machine = Machine::new_rng(
         gas as u64,
         fastrand::Rng::with_seed(machine_seed),
         config.clone(),

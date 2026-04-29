@@ -171,7 +171,7 @@ mod tests {
 
     #[test]
     fn run_tracks_created_contracts() {
-        let mut machine = Machine::new(100_000, Rng::with_seed(7), Config::default());
+        let mut machine = Machine::new_rng(100_000, Rng::with_seed(7), Config::default());
 
         assert!(
             machine
@@ -194,7 +194,7 @@ mod tests {
             addresses,
             ..Config::default()
         };
-        let mut machine = Machine::new(100_000, Rng::with_seed(7), config);
+        let mut machine = Machine::new_rng(100_000, Rng::with_seed(7), config);
 
         assert!(
             machine

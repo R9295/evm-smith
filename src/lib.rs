@@ -4,9 +4,8 @@
 compile_error!("enable at least one generation feature: `rng` or `arbitrary`");
 
 pub mod addresses;
-#[cfg(feature = "rng")]
 mod error;
-#[cfg(feature = "rng")]
+pub use error::Error;
 pub mod machine;
 pub mod opcodes;
 mod runner;
@@ -35,7 +34,7 @@ mod test {
         for _ in 0..1000 {
             let machine_rand = fastrand::Rng::with_seed(seed);
             let gas = 3_000_000;
-            let mut machine = Machine::new(gas, machine_rand, config.clone());
+            let mut machine = Machine::new_rng(gas, machine_rand, config.clone());
             loop {
                 let op = Opcode::generate_with_memory_limits(
                     &mut rand,
@@ -99,7 +98,10 @@ mod test {
         print_opcode_summary(&totals);
     }
 
-    fn assert_machine_state_valid(machine: &Machine, run_summary: &RunSummary) {
+    fn assert_machine_state_valid<S: crate::machine::MachineSource>(
+        machine: &Machine<S>,
+        run_summary: &RunSummary,
+    ) {
         let machine_created = machine.created_contracts();
         if machine_created != run_summary.created_contracts {
             report_state_error(run_summary, &machine_created, &machine.nonce_snapshot());
