@@ -11,7 +11,7 @@ use crate::{
     opcodes::{Opcode, Provides, Requires, Resource},
 };
 
-pub use crate::opcodes::{DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT};
+pub use crate::opcodes::{DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT, OpcodeWeights};
 
 /// Tunables for the symbolic generator.
 #[derive(Debug, Clone)]
@@ -38,6 +38,11 @@ pub struct Config {
     /// Inclusive upper bound for memory lengths sampled by generated opcodes.
     /// The default preserves the historical `u8` cap.
     pub memory_length_limit: u64,
+    /// Family-level opcode weights used by machine-driven generation. The
+    /// default balanced profile gives stateful/call/create/memory opcodes more
+    /// chances than flat variant sampling while `OpcodeWeights::uniform()`
+    /// preserves the historical distribution.
+    pub opcode_weights: OpcodeWeights,
 }
 
 impl Default for Config {
@@ -49,6 +54,7 @@ impl Default for Config {
             grow_callable_on_create: true,
             memory_offset_limit: DEFAULT_MEMORY_OFFSET_LIMIT,
             memory_length_limit: DEFAULT_MEMORY_LENGTH_LIMIT,
+            opcode_weights: OpcodeWeights::balanced(),
         }
     }
 }
@@ -57,6 +63,7 @@ pub trait MachineSource: Clone {
     fn pick_index(&mut self, len: usize) -> anyhow::Result<usize, Error>;
     fn next_opcode(
         &mut self,
+        opcode_weights: &OpcodeWeights,
         memory_offset_limit: u64,
         memory_length_limit: u64,
     ) -> anyhow::Result<Opcode, Error>;
@@ -92,11 +99,13 @@ impl MachineSource for RngMachineSource {
 
     fn next_opcode(
         &mut self,
+        opcode_weights: &OpcodeWeights,
         memory_offset_limit: u64,
         memory_length_limit: u64,
     ) -> anyhow::Result<Opcode, Error> {
-        Ok(Opcode::generate_with_memory_limits(
+        Ok(Opcode::generate_weighted_with_memory_limits(
             &mut self.rng,
+            opcode_weights,
             memory_offset_limit,
             memory_length_limit,
         ))
@@ -165,11 +174,17 @@ impl MachineSource for ArbitraryMachineSource {
 
     fn next_opcode(
         &mut self,
+        opcode_weights: &OpcodeWeights,
         memory_offset_limit: u64,
         memory_length_limit: u64,
     ) -> anyhow::Result<Opcode, Error> {
         self.with_unstructured(|u| {
-            Opcode::arbitrary_with_memory_limits(u, memory_offset_limit, memory_length_limit)
+            Opcode::arbitrary_weighted_with_memory_limits(
+                u,
+                opcode_weights,
+                memory_offset_limit,
+                memory_length_limit,
+            )
         })
     }
 
@@ -194,6 +209,7 @@ impl MachineSource for MissingMachineSource {
 
     fn next_opcode(
         &mut self,
+        _opcode_weights: &OpcodeWeights,
         _memory_offset_limit: u64,
         _memory_length_limit: u64,
     ) -> anyhow::Result<Opcode, Error> {
@@ -318,6 +334,22 @@ impl<S: MachineSource> Machine<S> {
 
     pub fn gas(&self) -> u64 {
         self.gas
+    }
+
+    /// Draws the next opcode using this machine's configured source, opcode
+    /// weights, and memory limits.
+    pub fn next_opcode(&mut self) -> anyhow::Result<Opcode, Error> {
+        self.source.next_opcode(
+            &self.config.opcode_weights,
+            self.config.memory_offset_limit,
+            self.config.memory_length_limit,
+        )
+    }
+
+    /// Draws and ingests one configured opcode.
+    pub fn ingest_next(&mut self) -> anyhow::Result<(), Error> {
+        let op = self.next_opcode()?;
+        self.ingest(op)
     }
 
     pub fn create_gas_percentage(&self) -> u8 {
@@ -456,6 +488,7 @@ impl<S: MachineSource> Machine<S> {
         );
         loop {
             let inner = match gen_source.next_opcode(
+                &sub_machine.config.opcode_weights,
                 sub_machine.config.memory_offset_limit,
                 sub_machine.config.memory_length_limit,
             ) {
@@ -852,6 +885,27 @@ mod tests {
         assert_eq!(machine.callable_addresses, vec![addresses.caller]);
         assert_eq!(machine.nonces.get(&addresses.caller), Some(&1));
         assert_eq!(machine.nonces.get(&addresses.contract), Some(&1));
+    }
+
+    #[test]
+    fn ingest_next_uses_configured_opcode_weights() {
+        let config = Config {
+            opcode_weights: OpcodeWeights {
+                calls: 1,
+                ..OpcodeWeights::zero()
+            },
+            memory_offset_limit: 0,
+            memory_length_limit: 0,
+            ..Config::default()
+        };
+        let mut machine = Machine::new_rng(1_000_000, Rng::with_seed(7), config);
+
+        machine.ingest_next().unwrap();
+
+        assert!(matches!(
+            machine.bytecode_ops()[0],
+            Opcode::Call { .. } | Opcode::StaticCall { .. } | Opcode::DelegateCall { .. }
+        ));
     }
 
     #[test]

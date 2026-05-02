@@ -19,7 +19,6 @@ use std::{
 use evm::{
     addresses::ExecutionAddresses,
     machine::{Config, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT, Machine},
-    opcodes::Opcode,
     state_test::{DEFAULT_SENDER_SK, build_state_test_json, derive_sender, hex0x},
 };
 
@@ -475,14 +474,8 @@ fn generate_bytecode(iter: u64, seed: u64, gas: u32, config: &Config) -> Vec<u8>
         fastrand::Rng::with_seed(machine_seed),
         config.clone(),
     );
-    let mut rand = fastrand::Rng::with_seed(machine_seed);
     loop {
-        let op = Opcode::generate_with_memory_limits(
-            &mut rand,
-            config.memory_offset_limit,
-            config.memory_length_limit,
-        );
-        if machine.ingest(op).is_err() {
+        if machine.ingest_next().is_err() {
             break;
         }
     }

@@ -20,7 +20,7 @@ mod test {
 
     #[test]
     fn generated_bytecode_matches_runtime_state() {
-        use crate::{machine::Config, opcodes::Opcode};
+        use crate::machine::Config;
         use revm::context_interface::result::{ExecutionResult, HaltReason, OutOfGasError};
         use std::time::SystemTime;
 
@@ -28,20 +28,14 @@ mod test {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let mut rand = fastrand::Rng::with_seed(seed.clone());
         let mut totals = [0u64; 256];
         let config = Config::default();
-        for _ in 0..1000 {
-            let machine_rand = fastrand::Rng::with_seed(seed);
+        for iter in 0..1000 {
+            let machine_rand = fastrand::Rng::with_seed(seed.wrapping_add(iter));
             let gas = 3_000_000;
             let mut machine = Machine::new_rng(gas, machine_rand, config.clone());
             loop {
-                let op = Opcode::generate_with_memory_limits(
-                    &mut rand,
-                    config.memory_offset_limit,
-                    config.memory_length_limit,
-                );
-                let Ok(_) = machine.ingest(op) else {
+                let Ok(_) = machine.ingest_next() else {
                     break;
                 };
             }

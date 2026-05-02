@@ -29,12 +29,9 @@ impl EvmByteBuffer {
 
 #[cfg(feature = "arbitrary")]
 pub fn arbitrary_state_test(data: Vec<u8>, gas: u64) -> Vec<u8> {
-    use arbitrary::Unstructured;
-
     use crate::{
         addresses::ExecutionAddresses,
         machine::{Config, Machine},
-        opcodes::Opcode,
     };
 
     let sender_sk = DEFAULT_SENDER_SK;
@@ -44,14 +41,9 @@ pub fn arbitrary_state_test(data: Vec<u8>, gas: u64) -> Vec<u8> {
         caller: sender,
         contract: ExecutionAddresses::default().contract,
     };
-    let mut machine = Machine::new_arbitrary(gas, data.clone(), config.clone());
-    let mut opcode_data = Unstructured::new(&data);
-    while let Ok(opcode) = Opcode::arbitrary_with_memory_limits(
-        &mut opcode_data,
-        config.memory_offset_limit,
-        config.memory_length_limit,
-    ) {
-        if !machine.ingest(opcode).is_ok() {
+    let mut machine = Machine::new_arbitrary(gas, data, config);
+    loop {
+        if !machine.ingest_next().is_ok() {
             break;
         }
     }
