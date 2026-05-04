@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::{
     Error,
     addresses::ExecutionAddresses,
-    opcodes::{Opcode, Provides, Requires, Resource},
+    opcodes::{Opcode, OpcodeSource, Provides, Render, Requires, Resource},
 };
 
 pub use crate::opcodes::{DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT, OpcodeWeights};
