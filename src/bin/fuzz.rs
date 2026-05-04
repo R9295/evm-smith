@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use evm::{
+use evm_smith::{
     addresses::ExecutionAddresses,
     machine::{Config, DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT, Machine},
     state_test::{DEFAULT_SENDER_SK, build_state_test_json, derive_sender, hex0x},

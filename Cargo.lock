@@ -1130,7 +1130,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "evm"
+name = "evm-smith"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
