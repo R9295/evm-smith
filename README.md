@@ -3,9 +3,6 @@
 evm-smith is a resource-aware EVM bytecode generator library. It builds final
 runtime bytecode from either a deterministic RNG source or arbitrary input bytes.
 
-To get bytecode, construct a `Machine`, call `ingest_next()` until generation
-stops, then call `machine.bytecode()`.
-
 ## Table of contents
 
 - [About](#about)
