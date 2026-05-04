@@ -342,20 +342,10 @@ impl Opcode {
         )
     }
 
-    /// Returns a uniformly-random generated `Opcode` variant. For `Push*`
-    /// variants the immediate-byte array is filled with random bytes from
-    /// `rng`. Terminating ops that need explicit placement (`STOP`,
-    /// `RETURN`, `SELFDESTRUCT`) are excluded.
-    #[cfg(feature = "rng")]
-    pub fn generate(rng: &mut Rng, config: &Config) -> Opcode {
-        let idx = rng.usize(0..GENERATED_VARIANT_COUNT);
-        Self::nth_variant_rng(idx, rng, config)
-    }
-
     /// Returns a weighted-random generated `Opcode` variant using the opcode
     /// weights and memory limits from `config`.
     #[cfg(feature = "rng")]
-    pub fn generate_weighted(rng: &mut Rng, config: &Config) -> Opcode {
+    pub fn generate(rng: &mut Rng, config: &Config) -> Opcode {
         let mut source = RngOpcodeSource::new(rng);
         let idx = match weighted_variant_index(&mut source, &config.opcode_weights) {
             Ok(idx) => idx,
@@ -375,22 +365,11 @@ impl Opcode {
         Self::nth_variant_rng(idx, rng, &Config::default())
     }
 
-    /// Returns an `Opcode` variant generated from arbitrary input bytes.
-    /// Terminating ops that need explicit placement (`STOP`, `RETURN`,
-    /// `SELFDESTRUCT`) are excluded.
-    #[cfg(feature = "arbitrary")]
-    pub fn arbitrary_with_config(
-        u: &mut Unstructured<'_>,
-        config: &Config,
-    ) -> arbitrary::Result<Opcode> {
-        let idx = u.int_in_range(0..=GENERATED_VARIANT_COUNT - 1)?;
-        Self::nth_variant_arbitrary(idx, u, config)
-    }
 
     /// Returns a weighted generated `Opcode` variant from arbitrary input bytes
     /// using the opcode weights and memory limits from `config`.
     #[cfg(feature = "arbitrary")]
-    pub fn arbitrary_weighted(
+    pub fn arbitrary(
         u: &mut Unstructured<'_>,
         config: &Config,
     ) -> arbitrary::Result<Opcode> {
@@ -662,12 +641,5 @@ impl Opcode {
             139 => Opcode::Clz,
             _ => unreachable!("nth_variant: idx {} out of range", idx),
         })
-    }
-}
-
-#[cfg(feature = "arbitrary")]
-impl<'a> Arbitrary<'a> for Opcode {
-    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Self::arbitrary_with_config(u, &Config::default())
     }
 }

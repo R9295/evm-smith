@@ -93,7 +93,7 @@ impl MachineSource for RngMachineSource {
     }
 
     fn next_opcode(&mut self, config: &Config) -> anyhow::Result<Opcode, Error> {
-        Ok(Opcode::generate_weighted(&mut self.rng, config))
+        Ok(Opcode::generate(&mut self.rng, config))
     }
 
     fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error> {
@@ -158,7 +158,7 @@ impl MachineSource for ArbitraryMachineSource {
     }
 
     fn next_opcode(&mut self, config: &Config) -> anyhow::Result<Opcode, Error> {
-        self.with_unstructured(|u| Opcode::arbitrary_weighted(u, config))
+        self.with_unstructured(|u| Opcode::arbitrary(u, config))
     }
 
     fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error> {

@@ -88,7 +88,7 @@ fn rng_weighted_generation_can_select_only_calls() {
     let mut rng = Rng::with_seed(0);
 
     for _ in 0..64 {
-        let op = Opcode::generate_weighted(&mut rng, &config);
+        let op = Opcode::generate(&mut rng, &config);
         assert!(matches!(
             op,
             Opcode::Call { .. } | Opcode::StaticCall { .. } | Opcode::DelegateCall { .. }
@@ -104,7 +104,7 @@ fn arbitrary_weighted_generation_can_select_only_calls() {
     let mut u = Unstructured::new(&data);
 
     for _ in 0..16 {
-        let op = Opcode::arbitrary_weighted(&mut u, &config).unwrap();
+        let op = Opcode::arbitrary(&mut u, &config).unwrap();
         assert!(matches!(
             op,
             Opcode::Call { .. } | Opcode::StaticCall { .. } | Opcode::DelegateCall { .. }
