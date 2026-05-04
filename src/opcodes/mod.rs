@@ -1,6 +1,6 @@
 mod resource;
 #[cfg(feature = "arbitrary")]
-use arbitrary::{Arbitrary, Unstructured};
+use arbitrary::Unstructured;
 pub use resource::*;
 pub mod requires;
 pub use requires::*;
@@ -365,14 +365,10 @@ impl Opcode {
         Self::nth_variant_rng(idx, rng, &Config::default())
     }
 
-
     /// Returns a weighted generated `Opcode` variant from arbitrary input bytes
     /// using the opcode weights and memory limits from `config`.
     #[cfg(feature = "arbitrary")]
-    pub fn arbitrary(
-        u: &mut Unstructured<'_>,
-        config: &Config,
-    ) -> arbitrary::Result<Opcode> {
+    pub fn arbitrary(u: &mut Unstructured<'_>, config: &Config) -> arbitrary::Result<Opcode> {
         let mut source = ArbitraryOpcodeSource::new(u);
         let idx = weighted_variant_index(&mut source, &config.opcode_weights)?;
         Self::nth_variant_from(idx, &mut source, config)
