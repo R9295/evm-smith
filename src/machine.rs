@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use crate::{
     Error,
     addresses::ExecutionAddresses,
-    opcodes::{Opcode, OpcodeSource, Provides, Render, Requires, Resource},
+    opcodes::{Opcode, Provides, Render, Requires, Resource},
 };
 
 pub use crate::opcodes::{DEFAULT_MEMORY_LENGTH_LIMIT, DEFAULT_MEMORY_OFFSET_LIMIT, OpcodeWeights};
@@ -61,12 +61,7 @@ impl Default for Config {
 
 pub trait MachineSource: Clone {
     fn pick_index(&mut self, len: usize) -> anyhow::Result<usize, Error>;
-    fn next_opcode(
-        &mut self,
-        opcode_weights: &OpcodeWeights,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
-    ) -> anyhow::Result<Opcode, Error>;
+    fn next_opcode(&mut self, config: &Config) -> anyhow::Result<Opcode, Error>;
     fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error>;
     fn fork(&mut self) -> anyhow::Result<(Self, Self), Error>;
 }
@@ -97,18 +92,8 @@ impl MachineSource for RngMachineSource {
         Ok(self.rng.usize(0..len))
     }
 
-    fn next_opcode(
-        &mut self,
-        opcode_weights: &OpcodeWeights,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
-    ) -> anyhow::Result<Opcode, Error> {
-        Ok(Opcode::generate_weighted_with_memory_limits(
-            &mut self.rng,
-            opcode_weights,
-            memory_offset_limit,
-            memory_length_limit,
-        ))
+    fn next_opcode(&mut self, config: &Config) -> anyhow::Result<Opcode, Error> {
+        Ok(Opcode::generate_weighted(&mut self.rng, config))
     }
 
     fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error> {
@@ -172,20 +157,8 @@ impl MachineSource for ArbitraryMachineSource {
         self.with_unstructured(|u| u.choose_index(len))
     }
 
-    fn next_opcode(
-        &mut self,
-        opcode_weights: &OpcodeWeights,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
-    ) -> anyhow::Result<Opcode, Error> {
-        self.with_unstructured(|u| {
-            Opcode::arbitrary_weighted_with_memory_limits(
-                u,
-                opcode_weights,
-                memory_offset_limit,
-                memory_length_limit,
-            )
-        })
+    fn next_opcode(&mut self, config: &Config) -> anyhow::Result<Opcode, Error> {
+        self.with_unstructured(|u| Opcode::arbitrary_weighted(u, config))
     }
 
     fn push_opcode(&mut self) -> anyhow::Result<Opcode, Error> {
@@ -207,12 +180,7 @@ impl MachineSource for MissingMachineSource {
         unreachable!("enable either the `rng` or `arbitrary` feature")
     }
 
-    fn next_opcode(
-        &mut self,
-        _opcode_weights: &OpcodeWeights,
-        _memory_offset_limit: u64,
-        _memory_length_limit: u64,
-    ) -> anyhow::Result<Opcode, Error> {
+    fn next_opcode(&mut self, _config: &Config) -> anyhow::Result<Opcode, Error> {
         unreachable!("enable either the `rng` or `arbitrary` feature")
     }
 
@@ -339,11 +307,7 @@ impl<S: MachineSource> Machine<S> {
     /// Draws the next opcode using this machine's configured source, opcode
     /// weights, and memory limits.
     pub fn next_opcode(&mut self) -> anyhow::Result<Opcode, Error> {
-        self.source.next_opcode(
-            &self.config.opcode_weights,
-            self.config.memory_offset_limit,
-            self.config.memory_length_limit,
-        )
+        self.source.next_opcode(&self.config)
     }
 
     /// Draws and ingests one configured opcode.
@@ -487,11 +451,7 @@ impl<S: MachineSource> Machine<S> {
             self.callable_addresses.clone(),
         );
         loop {
-            let inner = match gen_source.next_opcode(
-                &sub_machine.config.opcode_weights,
-                sub_machine.config.memory_offset_limit,
-                sub_machine.config.memory_length_limit,
-            ) {
+            let inner = match gen_source.next_opcode(&sub_machine.config) {
                 Ok(inner) => inner,
                 Err(Error::InputExhausted) => break,
                 Err(err) => return Err(err),

@@ -17,8 +17,8 @@ mod tests;
 use alloy_primitives::{Address, U256};
 #[cfg(feature = "rng")]
 use fastrand::Rng;
-#[cfg(feature = "rng")]
-use std::convert::Infallible;
+
+use crate::machine::Config;
 
 pub const DEFAULT_MEMORY_OFFSET_LIMIT: u64 = u16::MAX as u64;
 pub const DEFAULT_MEMORY_LENGTH_LIMIT: u64 = u8::MAX as u64;
@@ -313,24 +313,22 @@ fn generated_topic<S: OpcodeSource>(source: &mut S) -> Result<U256, S::Error> {
 
 fn generated_memory_range<S: OpcodeSource>(
     source: &mut S,
-    memory_offset_limit: u64,
-    memory_length_limit: u64,
+    config: &Config,
 ) -> Result<(u64, u64), S::Error> {
     Ok((
-        source.u64_inclusive(memory_offset_limit)?,
-        source.u64_inclusive(memory_length_limit)?,
+        source.u64_inclusive(config.memory_offset_limit)?,
+        source.u64_inclusive(config.memory_length_limit)?,
     ))
 }
 
 fn generated_copy_range<S: OpcodeSource>(
     source: &mut S,
-    memory_offset_limit: u64,
-    memory_length_limit: u64,
+    config: &Config,
 ) -> Result<(u64, u64, u64), S::Error> {
     Ok((
-        source.u64_inclusive(memory_offset_limit)?,
-        source.u64_inclusive(memory_offset_limit)?,
-        source.u64_inclusive(memory_length_limit)?,
+        source.u64_inclusive(config.memory_offset_limit)?,
+        source.u64_inclusive(config.memory_offset_limit)?,
+        source.u64_inclusive(config.memory_length_limit)?,
     ))
 }
 
@@ -349,43 +347,21 @@ impl Opcode {
     /// `rng`. Terminating ops that need explicit placement (`STOP`,
     /// `RETURN`, `SELFDESTRUCT`) are excluded.
     #[cfg(feature = "rng")]
-    pub fn generate(rng: &mut Rng) -> Opcode {
-        Self::generate_with_memory_limits(
-            rng,
-            DEFAULT_MEMORY_OFFSET_LIMIT,
-            DEFAULT_MEMORY_LENGTH_LIMIT,
-        )
-    }
-
-    /// Returns a uniformly-random generated `Opcode` variant, sampling memory
-    /// offsets from `0..=memory_offset_limit` and memory lengths from
-    /// `0..=memory_length_limit`.
-    #[cfg(feature = "rng")]
-    pub fn generate_with_memory_limits(
-        rng: &mut Rng,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
-    ) -> Opcode {
+    pub fn generate(rng: &mut Rng, config: &Config) -> Opcode {
         let idx = rng.usize(0..GENERATED_VARIANT_COUNT);
-        Self::nth_variant_rng(idx, rng, memory_offset_limit, memory_length_limit)
+        Self::nth_variant_rng(idx, rng, config)
     }
 
-    /// Returns a weighted-random generated `Opcode` variant, sampling memory
-    /// offsets from `0..=memory_offset_limit` and memory lengths from
-    /// `0..=memory_length_limit`.
+    /// Returns a weighted-random generated `Opcode` variant using the opcode
+    /// weights and memory limits from `config`.
     #[cfg(feature = "rng")]
-    pub fn generate_weighted_with_memory_limits(
-        rng: &mut Rng,
-        weights: &OpcodeWeights,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
-    ) -> Opcode {
+    pub fn generate_weighted(rng: &mut Rng, config: &Config) -> Opcode {
         let mut source = RngOpcodeSource::new(rng);
-        let idx = match weighted_variant_index(&mut source, weights) {
+        let idx = match weighted_variant_index(&mut source, &config.opcode_weights) {
             Ok(idx) => idx,
             Err(err) => match err {},
         };
-        match Self::nth_variant_from(idx, &mut source, memory_offset_limit, memory_length_limit) {
+        match Self::nth_variant_from(idx, &mut source, config) {
             Ok(op) => op,
             Err(err) => match err {},
         }
@@ -396,40 +372,31 @@ impl Opcode {
     #[cfg(feature = "rng")]
     pub fn generate_push(rng: &mut Rng) -> Opcode {
         let idx = PUSH_VARIANT_OFFSET + rng.usize(0..PUSH_VARIANT_COUNT);
-        Self::nth_variant_rng(
-            idx,
-            rng,
-            DEFAULT_MEMORY_OFFSET_LIMIT,
-            DEFAULT_MEMORY_LENGTH_LIMIT,
-        )
+        Self::nth_variant_rng(idx, rng, &Config::default())
     }
 
     /// Returns an `Opcode` variant generated from arbitrary input bytes.
     /// Terminating ops that need explicit placement (`STOP`, `RETURN`,
     /// `SELFDESTRUCT`) are excluded.
     #[cfg(feature = "arbitrary")]
-    pub fn arbitrary_with_memory_limits(
+    pub fn arbitrary_with_config(
         u: &mut Unstructured<'_>,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
+        config: &Config,
     ) -> arbitrary::Result<Opcode> {
         let idx = u.int_in_range(0..=GENERATED_VARIANT_COUNT - 1)?;
-        Self::nth_variant_arbitrary(idx, u, memory_offset_limit, memory_length_limit)
+        Self::nth_variant_arbitrary(idx, u, config)
     }
 
-    /// Returns a weighted generated `Opcode` variant from arbitrary input
-    /// bytes, sampling memory offsets from `0..=memory_offset_limit` and memory
-    /// lengths from `0..=memory_length_limit`.
+    /// Returns a weighted generated `Opcode` variant from arbitrary input bytes
+    /// using the opcode weights and memory limits from `config`.
     #[cfg(feature = "arbitrary")]
-    pub fn arbitrary_weighted_with_memory_limits(
+    pub fn arbitrary_weighted(
         u: &mut Unstructured<'_>,
-        weights: &OpcodeWeights,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
+        config: &Config,
     ) -> arbitrary::Result<Opcode> {
-        let mut source = ArbitraryOpcodeSource(u);
-        let idx = weighted_variant_index(&mut source, weights)?;
-        Self::nth_variant_from(idx, &mut source, memory_offset_limit, memory_length_limit)
+        let mut source = ArbitraryOpcodeSource::new(u);
+        let idx = weighted_variant_index(&mut source, &config.opcode_weights)?;
+        Self::nth_variant_from(idx, &mut source, config)
     }
 
     /// Returns a `Push*` variant generated from arbitrary input bytes.
@@ -437,23 +404,13 @@ impl Opcode {
     #[cfg(feature = "arbitrary")]
     pub fn arbitrary_push(u: &mut Unstructured<'_>) -> arbitrary::Result<Opcode> {
         let idx = PUSH_VARIANT_OFFSET + u.int_in_range(0..=PUSH_VARIANT_COUNT - 1)?;
-        Self::nth_variant_arbitrary(
-            idx,
-            u,
-            DEFAULT_MEMORY_OFFSET_LIMIT,
-            DEFAULT_MEMORY_LENGTH_LIMIT,
-        )
+        Self::nth_variant_arbitrary(idx, u, &Config::default())
     }
 
     #[cfg(feature = "rng")]
-    fn nth_variant_rng(
-        idx: usize,
-        rng: &mut Rng,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
-    ) -> Opcode {
+    fn nth_variant_rng(idx: usize, rng: &mut Rng, config: &Config) -> Opcode {
         let mut source = RngOpcodeSource::new(rng);
-        match Self::nth_variant_from(idx, &mut source, memory_offset_limit, memory_length_limit) {
+        match Self::nth_variant_from(idx, &mut source, config) {
             Ok(op) => op,
             Err(err) => match err {},
         }
@@ -463,18 +420,16 @@ impl Opcode {
     fn nth_variant_arbitrary(
         idx: usize,
         u: &mut Unstructured<'_>,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
+        config: &Config,
     ) -> arbitrary::Result<Opcode> {
-        let mut source = ArbitraryOpcodeSource(u);
-        Self::nth_variant_from(idx, &mut source, memory_offset_limit, memory_length_limit)
+        let mut source = ArbitraryOpcodeSource::new(u);
+        Self::nth_variant_from(idx, &mut source, config)
     }
 
     fn nth_variant_from<S: OpcodeSource>(
         idx: usize,
         source: &mut S,
-        memory_offset_limit: u64,
-        memory_length_limit: u64,
+        config: &Config,
     ) -> Result<Opcode, S::Error> {
         Ok(match idx {
             0 => Opcode::Add,
@@ -598,24 +553,21 @@ impl Opcode {
             118 => Opcode::Swap15,
             119 => Opcode::Swap16,
             120 => {
-                let offset = source.u64_inclusive(memory_offset_limit)?;
+                let offset = source.u64_inclusive(config.memory_offset_limit)?;
                 let value = U256::from_be_bytes(source.bytes::<32>()?);
                 Opcode::MStore(offset, value)
             }
-            121 => Opcode::MLoad(source.u64_inclusive(memory_offset_limit)?),
+            121 => Opcode::MLoad(source.u64_inclusive(config.memory_offset_limit)?),
             122 => {
-                let (offset, length) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (offset, length) = generated_memory_range(source, config)?;
                 Opcode::Log0(offset, length)
             }
             123 => {
-                let (offset, length) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (offset, length) = generated_memory_range(source, config)?;
                 Opcode::Log1(offset, length, generated_topic(source)?)
             }
             124 => {
-                let (offset, length) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (offset, length) = generated_memory_range(source, config)?;
                 Opcode::Log2(
                     offset,
                     length,
@@ -624,8 +576,7 @@ impl Opcode {
                 )
             }
             125 => {
-                let (offset, length) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (offset, length) = generated_memory_range(source, config)?;
                 Opcode::Log3(
                     offset,
                     length,
@@ -635,8 +586,7 @@ impl Opcode {
                 )
             }
             126 => {
-                let (offset, length) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (offset, length) = generated_memory_range(source, config)?;
                 Opcode::Log4(
                     offset,
                     length,
@@ -646,40 +596,36 @@ impl Opcode {
                     generated_topic(source)?,
                 )
             }
-            127 => Opcode::MStore8(source.u64_inclusive(memory_offset_limit)?, source.u8()?),
+            127 => Opcode::MStore8(
+                source.u64_inclusive(config.memory_offset_limit)?,
+                source.u8()?,
+            ),
             128 => {
-                let (dest, src, length) =
-                    generated_copy_range(source, memory_offset_limit, memory_length_limit)?;
+                let (dest, src, length) = generated_copy_range(source, config)?;
                 Opcode::MCopy(dest, src, length)
             }
             129 => {
-                let (dest, src, length) =
-                    generated_copy_range(source, memory_offset_limit, memory_length_limit)?;
+                let (dest, src, length) = generated_copy_range(source, config)?;
                 Opcode::CallDataCopy(dest, src, length)
             }
             130 => {
-                let (dest, src, length) =
-                    generated_copy_range(source, memory_offset_limit, memory_length_limit)?;
+                let (dest, src, length) = generated_copy_range(source, config)?;
                 Opcode::CodeCopy(dest, src, length)
             }
             131 => {
-                let (dest, src, length) =
-                    generated_copy_range(source, memory_offset_limit, memory_length_limit)?;
+                let (dest, src, length) = generated_copy_range(source, config)?;
                 Opcode::ExtCodeCopy(generated_topic(source)?, dest, src, length)
             }
-            132 => Opcode::CallDataLoad(source.u64_inclusive(memory_offset_limit)?),
+            132 => Opcode::CallDataLoad(source.u64_inclusive(config.memory_offset_limit)?),
             133 => {
-                let (offset, length) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (offset, length) = generated_memory_range(source, config)?;
                 Opcode::Keccak256(offset, length)
             }
             134 => Opcode::Create(Vec::new()),
             135 => Opcode::Create2(Vec::new(), generated_topic(source)?),
             136 => {
-                let (args_offset, args_size) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
-                let (ret_offset, ret_size) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (args_offset, args_size) = generated_memory_range(source, config)?;
+                let (ret_offset, ret_size) = generated_memory_range(source, config)?;
                 Opcode::Call {
                     gas: 0,
                     address: Address::ZERO,
@@ -690,10 +636,8 @@ impl Opcode {
                 }
             }
             137 => {
-                let (args_offset, args_size) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
-                let (ret_offset, ret_size) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (args_offset, args_size) = generated_memory_range(source, config)?;
+                let (ret_offset, ret_size) = generated_memory_range(source, config)?;
                 Opcode::StaticCall {
                     gas: 0,
                     address: Address::ZERO,
@@ -704,10 +648,8 @@ impl Opcode {
                 }
             }
             138 => {
-                let (args_offset, args_size) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
-                let (ret_offset, ret_size) =
-                    generated_memory_range(source, memory_offset_limit, memory_length_limit)?;
+                let (args_offset, args_size) = generated_memory_range(source, config)?;
+                let (ret_offset, ret_size) = generated_memory_range(source, config)?;
                 Opcode::DelegateCall {
                     gas: 0,
                     address: Address::ZERO,
@@ -726,10 +668,6 @@ impl Opcode {
 #[cfg(feature = "arbitrary")]
 impl<'a> Arbitrary<'a> for Opcode {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-        Self::arbitrary_with_memory_limits(
-            u,
-            DEFAULT_MEMORY_OFFSET_LIMIT,
-            DEFAULT_MEMORY_LENGTH_LIMIT,
-        )
+        Self::arbitrary_with_config(u, &Config::default())
     }
 }

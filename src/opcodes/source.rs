@@ -1,3 +1,6 @@
+#[cfg(feature = "arbitrary")]
+use arbitrary::{Arbitrary, Unstructured};
+#[cfg(feature = "rng")]
 use fastrand::Rng;
 #[cfg(feature = "rng")]
 use std::convert::Infallible;
@@ -12,6 +15,8 @@ pub trait OpcodeSource {
 
 #[cfg(feature = "rng")]
 pub struct RngOpcodeSource<'a>(&'a mut Rng);
+
+#[cfg(feature = "rng")]
 impl<'a> RngOpcodeSource<'a> {
     pub fn new(rng: &'a mut Rng) -> RngOpcodeSource<'a> {
         Self(rng)
@@ -43,6 +48,13 @@ impl OpcodeSource for RngOpcodeSource<'_> {
 
 #[cfg(feature = "arbitrary")]
 pub struct ArbitraryOpcodeSource<'a, 'b>(&'a mut Unstructured<'b>);
+
+#[cfg(feature = "arbitrary")]
+impl<'a, 'b> ArbitraryOpcodeSource<'a, 'b> {
+    pub fn new(u: &'a mut Unstructured<'b>) -> Self {
+        Self(u)
+    }
+}
 
 #[cfg(feature = "arbitrary")]
 impl OpcodeSource for ArbitraryOpcodeSource<'_, '_> {

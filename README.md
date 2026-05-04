@@ -42,8 +42,9 @@ See [LIMITATIONS.md](LIMITATIONS.md) for the CREATE2 address-stability reason.
 
 ## Usage
 
-The Cargo package is currently named `evm`. Enable either `rng` or `arbitrary`;
-the crate intentionally refuses to compile without a generation source.
+The Cargo package is currently named `evm-smith`. Enable either `rng` or
+`arbitrary`; the crate intentionally refuses to compile without a generation
+source.
 
 ### RNG generation
 

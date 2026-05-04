@@ -1,4 +1,12 @@
-use crate::opcodes::{GENERATED_VARIANT_COUNT, Opcode, OpcodeFamily, OpcodeWeights, Rng};
+#[cfg(feature = "arbitrary")]
+use arbitrary::Unstructured;
+#[cfg(feature = "rng")]
+use fastrand::Rng;
+
+use crate::{
+    machine::Config,
+    opcodes::{GENERATED_VARIANT_COUNT, Opcode, OpcodeFamily, OpcodeWeights},
+};
 
 const MEMORY_VARIANT_INDICES: [usize; 17] = [
     120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 136, 137, 138,
@@ -7,9 +15,10 @@ const MEMORY_VARIANT_INDICES: [usize; 17] = [
 #[cfg(feature = "rng")]
 #[test]
 fn rng_zero_memory_limits_force_zero_offsets_and_lengths() {
+    let config = zero_memory_config();
     for idx in MEMORY_VARIANT_INDICES {
         let mut rng = Rng::with_seed(idx as u64);
-        let op = Opcode::nth_variant_rng(idx, &mut rng, 0, 0);
+        let op = Opcode::nth_variant_rng(idx, &mut rng, &config);
         assert_memory_offsets_and_lengths(&op, 0, 0);
     }
 }
@@ -17,10 +26,11 @@ fn rng_zero_memory_limits_force_zero_offsets_and_lengths() {
 #[cfg(feature = "arbitrary")]
 #[test]
 fn arbitrary_zero_memory_limits_force_zero_offsets_and_lengths() {
+    let config = zero_memory_config();
     let data = [0xAB; 512];
     for idx in MEMORY_VARIANT_INDICES {
         let mut u = Unstructured::new(&data);
-        let op = Opcode::nth_variant_arbitrary(idx, &mut u, 0, 0).unwrap();
+        let op = Opcode::nth_variant_arbitrary(idx, &mut u, &config).unwrap();
         assert_memory_offsets_and_lengths(&op, 0, 0);
     }
 }
@@ -28,9 +38,10 @@ fn arbitrary_zero_memory_limits_force_zero_offsets_and_lengths() {
 #[cfg(feature = "rng")]
 #[test]
 fn rng_variants_exclude_manual_terminators() {
+    let config = zero_memory_config();
     let mut rng = Rng::with_seed(0);
     for idx in 0..GENERATED_VARIANT_COUNT {
-        let op = Opcode::nth_variant_rng(idx, &mut rng, 0, 0);
+        let op = Opcode::nth_variant_rng(idx, &mut rng, &config);
         assert!(!matches!(
             op,
             Opcode::Stop | Opcode::Return(..) | Opcode::SelfDestruct(..)
@@ -41,10 +52,11 @@ fn rng_variants_exclude_manual_terminators() {
 #[cfg(feature = "arbitrary")]
 #[test]
 fn arbitrary_variants_exclude_manual_terminators() {
+    let config = zero_memory_config();
     let data = [0xCD; 512];
     for idx in 0..GENERATED_VARIANT_COUNT {
         let mut u = Unstructured::new(&data);
-        let op = Opcode::nth_variant_arbitrary(idx, &mut u, 0, 0).unwrap();
+        let op = Opcode::nth_variant_arbitrary(idx, &mut u, &config).unwrap();
         assert!(!matches!(
             op,
             Opcode::Stop | Opcode::Return(..) | Opcode::SelfDestruct(..)
@@ -72,14 +84,11 @@ fn weighted_families_cover_every_generated_variant_once() {
 #[cfg(feature = "rng")]
 #[test]
 fn rng_weighted_generation_can_select_only_calls() {
-    let weights = OpcodeWeights {
-        calls: 1,
-        ..OpcodeWeights::zero()
-    };
+    let config = calls_only_config();
     let mut rng = Rng::with_seed(0);
 
     for _ in 0..64 {
-        let op = Opcode::generate_weighted_with_memory_limits(&mut rng, &weights, 0, 0);
+        let op = Opcode::generate_weighted(&mut rng, &config);
         assert!(matches!(
             op,
             Opcode::Call { .. } | Opcode::StaticCall { .. } | Opcode::DelegateCall { .. }
@@ -90,19 +99,36 @@ fn rng_weighted_generation_can_select_only_calls() {
 #[cfg(feature = "arbitrary")]
 #[test]
 fn arbitrary_weighted_generation_can_select_only_calls() {
-    let weights = OpcodeWeights {
-        calls: 1,
-        ..OpcodeWeights::zero()
-    };
+    let config = calls_only_config();
     let data = [0xEF; 2048];
     let mut u = Unstructured::new(&data);
 
     for _ in 0..16 {
-        let op = Opcode::arbitrary_weighted_with_memory_limits(&mut u, &weights, 0, 0).unwrap();
+        let op = Opcode::arbitrary_weighted(&mut u, &config).unwrap();
         assert!(matches!(
             op,
             Opcode::Call { .. } | Opcode::StaticCall { .. } | Opcode::DelegateCall { .. }
         ));
+    }
+}
+
+fn zero_memory_config() -> Config {
+    Config {
+        memory_offset_limit: 0,
+        memory_length_limit: 0,
+        ..Config::default()
+    }
+}
+
+fn calls_only_config() -> Config {
+    Config {
+        opcode_weights: OpcodeWeights {
+            calls: 1,
+            ..OpcodeWeights::zero()
+        },
+        memory_offset_limit: 0,
+        memory_length_limit: 0,
+        ..Config::default()
     }
 }
 
