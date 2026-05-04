@@ -654,13 +654,6 @@ impl Opcode {
     }
 
     /// Returns a uniformly-random generated `Opcode` variant, sampling memory
-    /// offsets from `0..=memory_offset_limit`.
-    #[cfg(feature = "rng")]
-    pub fn generate_with_memory_offset_limit(rng: &mut Rng, memory_offset_limit: u64) -> Opcode {
-        Self::generate_with_memory_limits(rng, memory_offset_limit, DEFAULT_MEMORY_LENGTH_LIMIT)
-    }
-
-    /// Returns a uniformly-random generated `Opcode` variant, sampling memory
     /// offsets from `0..=memory_offset_limit` and memory lengths from
     /// `0..=memory_length_limit`.
     #[cfg(feature = "rng")]
@@ -733,16 +726,6 @@ impl Opcode {
         let mut source = ArbitraryOpcodeSource(u);
         let idx = weighted_variant_index(&mut source, weights)?;
         Self::nth_variant_from(idx, &mut source, memory_offset_limit, memory_length_limit)
-    }
-
-    /// Returns an `Opcode` variant generated from arbitrary input bytes,
-    /// sampling memory offsets from `0..=memory_offset_limit`.
-    #[cfg(feature = "arbitrary")]
-    pub fn arbitrary_with_memory_offset_limit(
-        u: &mut Unstructured<'_>,
-        memory_offset_limit: u64,
-    ) -> arbitrary::Result<Opcode> {
-        Self::arbitrary_with_memory_limits(u, memory_offset_limit, DEFAULT_MEMORY_LENGTH_LIMIT)
     }
 
     /// Returns a `Push*` variant generated from arbitrary input bytes.
